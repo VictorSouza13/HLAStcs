@@ -453,7 +453,7 @@ HLAStcs <- function() {
 
       coefs <- summary(model)$coefficients
       or <- exp(coef(model))
-      ci <- exp(confint.default(model))
+      suppressMessages(ci <- exp(confint(model)))
 
       p_values <- coefs[-1, 4]
       p_corrected <- rep(NA, length(p_values))
