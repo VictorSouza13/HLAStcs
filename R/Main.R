@@ -454,6 +454,7 @@ HLAStcs <- function() {
       coefs <- summary(model)$coefficients
       or <- exp(coef(model))
       suppressMessages(ci <- exp(confint(model)))
+      aic <- AIC(model)
 
       p_values <- coefs[-1, 4]
       p_corrected <- rep(NA, length(p_values))
@@ -483,7 +484,8 @@ HLAStcs <- function() {
         allele = allele_var,
         n_alleles = n_alleles,
         n = nrow(df),
-        covariates = covariates
+        covariates = covariates,
+        aic = aic
       )
 
       return(results)
@@ -532,7 +534,7 @@ HLAStcs <- function() {
                    selectInput("outcome_var", "Variável de Desfecho:", choices = NULL),
                    uiOutput("group_selection_ui"),
                    selectInput("allele_var", "Alelo para análise:", choices = NULL),
-                   uiOutput("covariate_selection_ui"),
+                   uiOutput("covariate_selection_ui"),  # Novo UI dinâmico
                    actionButton("run_regression", "Calcular", class = "btn-primary"),
                    tags$hr(),
                    h4("Resultados:"),
@@ -954,27 +956,42 @@ HLAStcs <- function() {
       cat("Alelo analisado:", res$allele, "\n")
       cat("Grupo de referência (0):", res$groups[1], "\n")
       cat("Grupo de comparação (1):", res$groups[2], "\n")
-      cat("Amostra utilizada:", res$n, "indivíduos\n\n")
+      cat("Amostra utilizada:", res$n, "indivíduos\n")
+      cat("AIC (Critério de Informação de Akaike):", round(res$aic, 2), "\n\n")
       cat("Método: Modelo linear generalizado (família binomial)\n")
+      cat("Interpretação do AIC:\n")
+      cat("- Quanto menor o AIC, melhor o modelo\n")
+      cat("- Diferenças >2 entre modelos são consideradas significativas\n")
     })
 
     output$regression_table <- renderTable({
       req(regression_results())
-      res <- regression_results()$summary
+      res <- regression_results()
 
-      res$Variável <- gsub("_", " ", res$Variável)
-      res$Variável <- tools::toTitleCase(res$Variável)
+      model_summary <- res$summary
 
-      res <- res[, c("Variável", "OR", "IC_95", "p_valor", "Pc")]
+      model_summary$Variável <- gsub("_", " ", model_summary$Variável)
+      model_summary$Variável <- tools::toTitleCase(model_summary$Variável)
+
+      model_summary <- model_summary[, c("Variável", "OR", "IC_95", "p_valor", "Pc")]
+
+      aic_row <- data.frame(
+        Variável = "AIC do Modelo",
+        OR = round(res$aic, 2),
+        IC_95 = "",
+        p_valor = "",
+        Pc = ""
+      )
+
+      final_table <- rbind(model_summary, aic_row)
 
       output$regression_note <- renderText({
         paste("Correção de Bonferroni aplicada multiplicando pelo número de alelos no locus (n =",
-              regression_results()$n_alleles, ")")
+              res$n_alleles, ")")
       })
 
-      res
+      final_table
     }, striped = TRUE, digits = 4, align = 'lrrrr')
-
 
     output$covariate_selection_ui <- renderUI({
       req(analysis_results$data, input$outcome_var)
