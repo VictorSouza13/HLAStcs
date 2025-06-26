@@ -3,6 +3,7 @@
 #' Esta função executa a conversão de planilhas para ARP sem complicações.
 #' @export
 #BUG FIX VERSION
+Convert <- function () {
 check_and_install_packages <- function(packages) {
   for (pkg in packages) {
     if (!require(pkg, character.only = TRUE)) {
