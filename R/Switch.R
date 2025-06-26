@@ -25,7 +25,8 @@ ui <- fluidPage(
       uiOutput("download_ui")
     ),
     mainPanel(
-      verbatimTextOutput("messages")
+      verbatimTextOutput("messages"),
+      tableOutput("conversion_info")
     )
   )
 )
@@ -55,6 +56,25 @@ server <- function(input, output, session) {
     })
   })
 
+  # Função para converter numérico em categórico usando quantis
+  auto_convert_to_category <- function(x) {
+    if(is.numeric(x)) {
+      # Usar quartis como padrão, mas ajusta o número de grupos conforme o tamanho dos dados
+      n_groups <- min(4, length(unique(na.omit(x))))
+      if(n_groups > 1) {
+        breaks <- quantile(x, probs = seq(0, 1, length.out = n_groups + 1), na.rm = TRUE)
+        labels <- paste0("Q", 1:n_groups)
+        return(cut(x, breaks = unique(breaks), labels = labels, include.lowest = TRUE))
+      }
+    }
+    return(as.character(x)) # Mantém como está se não for numérico ou não puder ser agrupado
+  }
+
+  # Função para limpar os prefixos dos alelos
+  clean_allele <- function(allele) {
+    str_replace(allele, ".*\\*", "")
+  }
+
   # Gera o arquivo ARP quando o botão é clicado
   observeEvent(input$convert, {
     req(input$file, input$group_column, data_loaded())
@@ -62,20 +82,43 @@ server <- function(input, output, session) {
     tryCatch({
       data <- data_loaded()
 
-      # Verificar se as colunas necessárias existem
-      required_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2")
+      # Verificar colunas necessárias
+      required_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2", input$group_column)
       if(!all(required_cols %in% colnames(data))) {
-        stop("O arquivo Excel não contém todas as colunas necessárias (A1, A2, B1, B2, DRB1_1, DRB1_2)")
+        stop("O arquivo Excel não contém todas as colunas necessárias")
       }
 
-      # Renomear a coluna de grupo para "disease" para compatibilidade com a função original
-      data <- data %>% rename(disease = !!sym(input$group_column))
+      # Converter coluna de agrupamento se for numérica
+      original_values <- data[[input$group_column]]
+      converted_values <- auto_convert_to_category(original_values)
+
+      # Mostrar informações da conversão (APENAS SE FOR NUMÉRICO)
+      if(is.numeric(original_values)) {
+        output$conversion_info <- renderTable({
+          # Criar um resumo da conversão em vez de mapear todos os valores
+          conversion_summary <- data.frame(
+            Categoria = levels(converted_values),
+            Minimo = tapply(original_values, converted_values, min, na.rm = TRUE),
+            Maximo = tapply(original_values, converted_values, max, na.rm = TRUE),
+            Observacoes = as.numeric(table(converted_values))
+          )
+          names(conversion_summary) <- c("Categoria", "Valor Mínimo", "Valor Máximo", "Nº Observações")
+          conversion_summary
+        }, caption = "Resumo da Conversão Automática por Quartis", caption.placement = "top")
+      } else {
+        output$conversion_info <- NULL
+      }
+
+      data[[input$group_column]] <- converted_values
+
+      # Criar coluna temporária para o grupo
+      data <- data %>% mutate(group_column = !!sym(input$group_column))
 
       # Processar metadados e estrutura
       profile <- c(
         "[Profile]",
         '  Title = "Dados_convertidos"',
-        paste("  NbSamples =", length(unique(data$disease))),
+        paste("  NbSamples =", length(unique(data$group_column))),
         "  DataType = MICROSAT",
         "  GenotypicData = 1",
         "  LocusSeparator = WHITESPACE",
@@ -85,28 +128,24 @@ server <- function(input, output, session) {
       )
 
       # Processar dados genéticos
-      diseases <- unique(data$disease)
+      groups <- unique(data$group_column)
       data_sections <- list()
 
-      for(disease in diseases) {
-        sample_data <- data %>% filter(disease == disease)
+      for(group in groups) {
+        sample_data <- data %>% filter(group_column == group)
 
-        # Gerar IDs aleatórios no formato C + número sequencial
+        # Gerar IDs
         sample_data$IndividualID <- paste0("C", 1:nrow(sample_data))
 
-        # Formatar os dados genéticos
+        # Limpar prefixos dos alelos
+        sample_data <- sample_data %>%
+          mutate(across(c(A1, A2, B1, B2, DRB1_1, DRB1_2), clean_allele))
+
+        # Formatar dados genéticos
         formatted_data <- sample_data %>%
           mutate(
-            allele1 = paste(
-              paste0("A*", A1),
-              paste0("B*", B1),
-              paste0("DRB1*", DRB1_1),
-              sep = " "),
-            allele2 = paste(
-              paste0("A*", A2),
-              paste0("B*", B2),
-              paste0("DRB1*", DRB1_2),
-              sep = " ")
+            allele1 = paste(paste0("A*", A1), paste0("B*", B1), paste0("DRB1*", DRB1_1), sep = " "),
+            allele2 = paste(paste0("A*", A2), paste0("B*", B2), paste0("DRB1*", DRB1_2), sep = " ")
           ) %>%
           select(IndividualID, allele1, allele2)
 
@@ -121,9 +160,9 @@ server <- function(input, output, session) {
         }
 
         # Criar seção da amostra
-        data_sections[[disease]] <- c(
+        data_sections[[as.character(group)]] <- c(
           "[[Samples]]",
-          sprintf('  SampleName = "%s"', disease),
+          sprintf('  SampleName = "%s"', group),
           sprintf("  SampleSize = %d", nrow(sample_data)),
           "  SampleData = {",
           genetic_lines,
@@ -134,7 +173,7 @@ server <- function(input, output, session) {
       # Criar conteúdo do arquivo
       arp_content <- c(profile, "", "[Data]", "", unlist(data_sections))
 
-      # Armazenar o conteúdo para download
+      # Preparar download
       output$download_ui <- renderUI({
         downloadButton("download_arp", "Baixar arquivo .arp")
       })
@@ -148,7 +187,13 @@ server <- function(input, output, session) {
         }
       )
 
-      output$messages <- renderText("Conversão concluída! Clique em 'Baixar arquivo .arp'")
+      output$messages <- renderText({
+        if(is.numeric(original_values)) {
+          paste("Conversão concluída! Valores numéricos foram automaticamente agrupados por quartis. Clique em 'Baixar arquivo .arp'")
+        } else {
+          "Conversão concluída! Clique em 'Baixar arquivo .arp'"
+        }
+      })
 
     }, error = function(e) {
       output$messages <- renderText(paste("Erro na conversão:", e$message))
