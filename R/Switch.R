@@ -2,7 +2,6 @@
 #'
 #' Esta função executa a conversão de planilhas para ARP sem complicações.
 #' @export
-Convert <- function() {
 check_and_install_packages <- function(packages) {
   for (pkg in packages) {
     if (!require(pkg, character.only = TRUE)) {
@@ -12,7 +11,8 @@ check_and_install_packages <- function(packages) {
   }
 }
 
-required_packages <- c("shiny", "readxl", "dplyr", "tidyr")
+# Adicione stringr aos pacotes necessários
+required_packages <- c("shiny", "readxl", "dplyr", "tidyr", "stringr")
 check_and_install_packages(required_packages)
 
 ui <- fluidPage(
