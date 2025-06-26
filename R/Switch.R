@@ -2,7 +2,6 @@
 #'
 #' Esta função executa a conversão de planilhas para ARP sem complicações.
 #' @export
-#BUG FIX VERSION
 Convert <- function () {
 check_and_install_packages <- function(packages) {
   for (pkg in packages) {
@@ -13,7 +12,6 @@ check_and_install_packages <- function(packages) {
   }
 }
 
-# Adicione stringr aos pacotes necessários
 required_packages <- c("shiny", "readxl", "dplyr", "tidyr", "stringr")
 check_and_install_packages(required_packages)
 
@@ -34,19 +32,15 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
-  # Armazena os dados carregados
   data_loaded <- reactiveVal(NULL)
 
-  # Atualiza quando um arquivo é carregado
   observeEvent(input$file, {
     req(input$file)
 
     tryCatch({
-      # Ler o arquivo Excel
       data <- read_excel(input$file$datapath)
       data_loaded(data)
 
-      # Atualizar seletor de colunas
       output$column_selector <- renderUI({
         selectInput("group_column", "Selecione a coluna para agrupamento",
                     choices = colnames(data))
@@ -58,10 +52,8 @@ server <- function(input, output, session) {
     })
   })
 
-  # Função para converter numérico em categórico usando quantis
   auto_convert_to_category <- function(x) {
     if(is.numeric(x)) {
-      # Usar quartis como padrão, mas ajusta o número de grupos conforme o tamanho dos dados
       n_groups <- min(4, length(unique(na.omit(x))))
       if(n_groups > 1) {
         breaks <- quantile(x, probs = seq(0, 1, length.out = n_groups + 1), na.rm = TRUE)
@@ -69,35 +61,29 @@ server <- function(input, output, session) {
         return(cut(x, breaks = unique(breaks), labels = labels, include.lowest = TRUE))
       }
     }
-    return(as.character(x)) # Mantém como está se não for numérico ou não puder ser agrupado
+    return(as.character(x))
   }
 
-  # Função para limpar os prefixos dos alelos
   clean_allele <- function(allele) {
     str_replace(allele, ".*\\*", "")
   }
 
-  # Gera o arquivo ARP quando o botão é clicado
   observeEvent(input$convert, {
     req(input$file, input$group_column, data_loaded())
 
     tryCatch({
       data <- data_loaded()
 
-      # Verificar colunas necessárias
       required_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2", input$group_column)
       if(!all(required_cols %in% colnames(data))) {
         stop("O arquivo Excel não contém todas as colunas necessárias")
       }
 
-      # Converter coluna de agrupamento se for numérica
       original_values <- data[[input$group_column]]
       converted_values <- auto_convert_to_category(original_values)
 
-      # Mostrar informações da conversão (APENAS SE FOR NUMÉRICO)
       if(is.numeric(original_values)) {
         output$conversion_info <- renderTable({
-          # Criar um resumo da conversão em vez de mapear todos os valores
           conversion_summary <- data.frame(
             Categoria = levels(converted_values),
             Minimo = tapply(original_values, converted_values, min, na.rm = TRUE),
@@ -113,10 +99,8 @@ server <- function(input, output, session) {
 
       data[[input$group_column]] <- converted_values
 
-      # Criar coluna temporária para o grupo
       data <- data %>% mutate(group_column = !!sym(input$group_column))
 
-      # Processar metadados e estrutura
       profile <- c(
         "[Profile]",
         '  Title = "Dados_convertidos"',
@@ -129,21 +113,17 @@ server <- function(input, output, session) {
         "  RecessiveData = 0"
       )
 
-      # Processar dados genéticos
       groups <- unique(data$group_column)
       data_sections <- list()
 
       for(group in groups) {
         sample_data <- data %>% filter(group_column == group)
 
-        # Gerar IDs
         sample_data$IndividualID <- paste0("C", 1:nrow(sample_data))
 
-        # Limpar prefixos dos alelos
         sample_data <- sample_data %>%
           mutate(across(c(A1, A2, B1, B2, DRB1_1, DRB1_2), clean_allele))
 
-        # Formatar dados genéticos
         formatted_data <- sample_data %>%
           mutate(
             allele1 = paste(paste0("A*", A1), paste0("B*", B1), paste0("DRB1*", DRB1_1), sep = " "),
@@ -151,7 +131,6 @@ server <- function(input, output, session) {
           ) %>%
           select(IndividualID, allele1, allele2)
 
-        # Criar strings no formato correto
         genetic_lines <- character()
         for(i in 1:nrow(formatted_data)) {
           genetic_lines <- c(
@@ -161,7 +140,6 @@ server <- function(input, output, session) {
           )
         }
 
-        # Criar seção da amostra
         data_sections[[as.character(group)]] <- c(
           "[[Samples]]",
           sprintf('  SampleName = "%s"', group),
@@ -172,10 +150,8 @@ server <- function(input, output, session) {
         )
       }
 
-      # Criar conteúdo do arquivo
       arp_content <- c(profile, "", "[Data]", "", unlist(data_sections))
 
-      # Preparar download
       output$download_ui <- renderUI({
         downloadButton("download_arp", "Baixar arquivo .arp")
       })
