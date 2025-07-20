@@ -1,10 +1,10 @@
-#' Função principal do pacote HLAStcs
+#' Main function of the HLAStcs package
 #'
-#' Esta função executa a análise principal do pacote.
+#' This function performs the main analysis of the package.
 #' @export
 HLAStcs <- function() {
   required_packages <- c(
-    "openxlsx", "shiny", "DT"
+    "openxlsx", "shiny", "DT", "shinyjs"
   )
 
   install_missing_packages <- function(packages) {
@@ -21,71 +21,43 @@ HLAStcs <- function() {
   library(openxlsx)
   library(shiny)
   library(DT)
+  library(shinyjs)
 
   read_hla_data <- function(file_path) {
     tryCatch({
       if(!file.exists(file_path)) {
-        stop("Arquivo não encontrado. Verifique o caminho.")
+        stop("File not found. Please check the path.")
       }
 
       hla_data <- read.xlsx(file_path)
 
       if(is.null(hla_data) || nrow(hla_data) == 0) {
-        stop("Arquivo vazio ou formato inválido.")
+        stop("Empty file or invalid format.")
       }
 
-      drb1_cols <- grep("^DRB1", colnames(hla_data), value = TRUE, ignore.case = TRUE)
-
-      if(length(drb1_cols) < 2) {
-        stop("São necessárias pelo menos duas colunas DRB1 (DRB1_1 e DRB1_2)")
-      }
-
-      if(!all(c("DRB1_1", "DRB1_2") %in% colnames(hla_data))) {
-        colnames(hla_data)[match(drb1_cols[1:2], colnames(hla_data))] <- c("DRB1_1", "DRB1_2")
-      }
-
-      required_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2")
-      missing_cols <- setdiff(required_cols, colnames(hla_data))
-
-      if(length(missing_cols) > 0) {
-        stop(paste("Colunas faltando:", paste(missing_cols, collapse = ", ")))
-      }
-
-      loci <- c("A", "B", "DRB1")
-      hla_alleles <- list()
-
-      for(locus in loci) {
-        col1 <- ifelse(locus == "DRB1", paste0(locus, "_1"), paste0(locus, "1"))
-        col2 <- ifelse(locus == "DRB1", paste0(locus, "_2"), paste0(locus, "2"))
-
-        alleles <- c(trimws(as.character(hla_data[[col1]])), trimws(as.character(hla_data[[col2]])))
-        alleles <- alleles[!is.na(alleles) & alleles != "" & alleles != "NA"]
-
-        if(locus == "DRB1") {
-          alleles <- alleles[grepl("^DRB1\\*\\d+", alleles)]
-
-          if(length(alleles) == 0) {
-            stop("Nenhum alelo DRB1 válido encontrado. Verifique se os dados seguem o formato 'DRB1*NN'")
-          }
-        }
-
-        hla_alleles[[locus]] <- alleles
-      }
-
-      return(list(data = hla_data, alleles = hla_alleles))
+      return(list(data = hla_data))
 
     }, error = function(e) {
-      stop(paste("Erro na leitura:", e$message))
+      stop(paste("Error reading file:", e$message))
     })
   }
 
-  calculate_allele_frequencies <- function(allele_list) {
-    if(is.null(allele_list)) stop("Dados de alelos ausentes")
+  calculate_allele_frequencies <- function(hla_data, selected_loci) {
+    if(is.null(hla_data)) stop("Missing allele data")
 
     freq_list <- list()
 
-    for(locus in names(allele_list)) {
-      alleles <- allele_list[[locus]]
+    for(locus in selected_loci) {
+      col1 <- paste0(locus, "_1")
+      col2 <- paste0(locus, "_2")
+
+      if(!all(c(col1, col2) %in% colnames(hla_data))) {
+        stop(paste("Columns for locus", locus, "not found (expected:", col1, "and", col2, ")"))
+      }
+
+      alleles <- c(trimws(as.character(hla_data[[col1]])), trimws(as.character(hla_data[[col2]])))
+      alleles <- alleles[!is.na(alleles) & alleles != "" & alleles != "NA"]
+
       if(length(alleles) == 0) next
 
       freq_table <- as.data.frame(table(alleles))
@@ -99,19 +71,19 @@ HLAStcs <- function() {
       freq_list[[locus]] <- freq_table
     }
 
-    if(length(freq_list) == 0) stop("Não foi possível calcular frequências")
+    if(length(freq_list) == 0) stop("Could not calculate frequencies")
     return(freq_list)
   }
 
-  test_hwe <- function(hla_data, loci = c("A", "B", "DRB1")) {
+  test_hwe <- function(hla_data, selected_loci) {
     hwe_results <- list()
 
-    for(locus in loci) {
-      col1 <- paste0(locus, ifelse(locus == "DRB1", "_1", "1"))
-      col2 <- paste0(locus, ifelse(locus == "DRB1", "_2", "2"))
+    for(locus in selected_loci) {
+      col1 <- paste0(locus, "_1")
+      col2 <- paste0(locus, "_2")
 
       if(!all(c(col1, col2) %in% colnames(hla_data))) {
-        warning(paste("Colunas", col1, "ou", col2, "não encontradas"))
+        warning(paste("Columns", col1, "or", col2, "not found"))
         next
       }
 
@@ -125,7 +97,7 @@ HLAStcs <- function() {
       allele2 <- allele2[valid]
 
       if(length(allele1) < 5) {
-        warning(paste("Amostra muito pequena para", locus, "(n =", length(allele1), ")"))
+        warning(paste("Sample size too small for", locus, "(n =", length(allele1), ")"))
         next
       }
 
@@ -161,7 +133,7 @@ HLAStcs <- function() {
       expected <- expected[valid_categories]
 
       if(length(observed) < 2) {
-        warning(paste("Não há diversidade suficiente para testar HWE em", locus))
+        warning(paste("Not enough diversity to test HWE in", locus))
         next
       }
 
@@ -185,21 +157,21 @@ HLAStcs <- function() {
     return(hwe_results)
   }
 
-  calculate_all_ld <- function(hla_data) {
-    loci <- c("A", "B", "DRB1")
-    ld_results <- list()
+  calculate_all_ld <- function(hla_data, selected_loci) {
+    if(length(selected_loci) < 2) return(NULL)
 
-    locus_pairs <- combn(loci, 2, simplify = FALSE)
+    ld_results <- list()
+    locus_pairs <- combn(selected_loci, 2, simplify = FALSE)
 
     for(pair in locus_pairs) {
       locus1 <- pair[1]
       locus2 <- pair[2]
 
       tryCatch({
-        col1_1 <- paste0(locus1, ifelse(locus1 == "DRB1", "_1", "1"))
-        col1_2 <- paste0(locus1, ifelse(locus1 == "DRB1", "_2", "2"))
-        col2_1 <- paste0(locus2, ifelse(locus2 == "DRB1", "_1", "1"))
-        col2_2 <- paste0(locus2, ifelse(locus2 == "DRB1", "_2", "2"))
+        col1_1 <- paste0(locus1, "_1")
+        col1_2 <- paste0(locus1, "_2")
+        col2_1 <- paste0(locus2, "_1")
+        col2_2 <- paste0(locus2, "_2")
 
         geno1 <- paste(
           gsub("([A-Z]+\\*\\d+):?\\d*", "\\1", hla_data[[col1_1]]),
@@ -302,85 +274,76 @@ HLAStcs <- function() {
         )
 
       }, error = function(e) {
-        message(paste("Erro no cálculo de LD para", locus1, "-", locus2, ":", e$message))
+        message(paste("Error calculating LD for", locus1, "-", locus2, ":", e$message))
       })
     }
 
     return(ld_results)
   }
 
-  calculate_complete_haplotypes <- function(hla_data) {
+  calculate_complete_haplotypes <- function(hla_data, selected_loci) {
     tryCatch({
-      loci <- c("A", "B", "DRB1")
+      if(length(selected_loci) < 2) return(NULL)
 
       allele_cols <- list()
-      for(locus in loci) {
-        col1 <- paste0(locus, ifelse(locus == "DRB1", "_1", "1"))
-        col2 <- paste0(locus, ifelse(locus == "DRB1", "_2", "2"))
+      for(locus in selected_loci) {
+        col1 <- paste0(locus, "_1")
+        col2 <- paste0(locus, "_2")
+
+        if(!all(c(col1, col2) %in% colnames(hla_data))) {
+          stop(paste("Missing columns for locus", locus, ":",
+                     paste(setdiff(c(col1, col2), colnames(hla_data)), collapse = ", ")))
+        }
+
         allele_cols[[locus]] <- c(col1, col2)
       }
 
-      missing_cols <- setdiff(unlist(allele_cols), colnames(hla_data))
-      if(length(missing_cols) > 0) {
-        stop(paste("Colunas faltando:", paste(missing_cols, collapse = ", ")))
-      }
+      haplotypes <- character()
 
-      alleles <- list()
-      for(locus in loci) {
-        cols <- allele_cols[[locus]]
-        allele1 <- gsub("([A-Z]+\\*\\d+):?\\d*", "\\1", hla_data[[cols[1]]])
-        allele2 <- gsub("([A-Z]+\\*\\d+):?\\d*", "\\1", hla_data[[cols[2]]])
+      for(i in 1:nrow(hla_data)) {
+        haplo1 <- sapply(selected_loci, function(locus) {
+          gsub("([A-Z]+\\*\\d+):?\\d*", "\\1", hla_data[[allele_cols[[locus]][1]]][i])
+        })
 
-        valid <- !is.na(allele1) & !is.na(allele2) &
-          allele1 != "" & allele2 != ""
+        haplo2 <- sapply(selected_loci, function(locus) {
+          gsub("([A-Z]+\\*\\d+):?\\d*", "\\1", hla_data[[allele_cols[[locus]][2]]][i])
+        })
 
-        alleles[[paste0(locus, "1")]] <- allele1[valid]
-        alleles[[paste0(locus, "2")]] <- allele2[valid]
-      }
-
-      n_individuals <- unique(sapply(alleles, length))
-      if(length(n_individuals) != 1) {
-        stop("Número inconsistente de indivíduos entre os loci")
-      }
-      n_individuals <- n_individuals[1]
-
-      if(n_individuals < 10) {
-        stop("Amostra muito pequena para cálculo de haplótipos (n < 10)")
-      }
-
-      haplotypes <- character(n_individuals * 8)
-      index <- 1
-
-      for(i in 1:n_individuals) {
-        for(a in c(alleles[["A1"]][i], alleles[["A2"]][i])) {
-          for(b in c(alleles[["B1"]][i], alleles[["B2"]][i])) {
-            for(drb in c(alleles[["DRB11"]][i], alleles[["DRB12"]][i])) {
-              haplotypes[index] <- paste(a, b, drb, sep = "-")
-              index <- index + 1
-            }
-          }
+        if(!any(is.na(haplo1))) {
+          haplotypes <- c(haplotypes, paste(haplo1, collapse = "-"))
         }
+
+        if(!any(is.na(haplo2))) {
+          haplotypes <- c(haplotypes, paste(haplo2, collapse = "-"))
+        }
+      }
+
+      haplotypes <- haplotypes[!is.na(haplotypes) & haplotypes != "" & !grepl("NA", haplotypes)]
+
+      if(length(haplotypes) == 0) {
+        stop("No valid haplotypes found after processing")
       }
 
       haplo_counts <- as.data.frame(table(haplotypes))
       haplo_counts$Frequency <- haplo_counts$Freq / sum(haplo_counts$Freq)
       haplo_counts$Percentage <- round(haplo_counts$Frequency * 100, 2)
       haplo_counts <- haplo_counts[order(-haplo_counts$Frequency), ]
-      colnames(haplo_counts) <- c("Haplótipo", "Contagem", "Frequência", "Porcentagem")
+      colnames(haplo_counts) <- c("Haplotype", "Count", "Frequency", "Percentage")
 
-      haplo_alleles <- strsplit(as.character(haplo_counts$Haplótipo), "-")
-      haplo_counts$A <- sapply(haplo_alleles, `[`, 1)
-      haplo_counts$B <- sapply(haplo_alleles, `[`, 2)
-      haplo_counts$DRB1 <- sapply(haplo_alleles, `[`, 3)
+      haplo_alleles <- strsplit(as.character(haplo_counts$Haplotype), "-")
+      for(i in seq_along(selected_loci)) {
+        haplo_counts[[selected_loci[i]]] <- sapply(haplo_alleles, `[`, i)
+      }
 
       return(list(
         haplotype_counts = haplo_counts,
-        n_individuals = n_individuals,
-        n_haplotypes = nrow(haplo_counts)
+        n_individuals = nrow(hla_data),
+        n_haplotypes = nrow(haplo_counts),
+        loci = selected_loci
       ))
 
     }, error = function(e) {
-      stop(paste("Erro no cálculo de haplótipos:", e$message))
+      stop(paste("Error calculating haplotypes:", e$message))
     })
   }
 
@@ -389,7 +352,7 @@ HLAStcs <- function() {
       df <- data.frame(data)
 
       count_alleles <- function(locus) {
-        cols <- if (locus == "DRB1") c("DRB1_1", "DRB1_2") else c(paste0(locus, "1"), paste0(locus, "2"))
+        cols <- paste0(locus, c("_1", "_2"))
         alleles <- unique(na.omit(unlist(df[cols])))
         alleles <- alleles[alleles != "" & !is.na(alleles)]
         length(alleles)
@@ -404,7 +367,7 @@ HLAStcs <- function() {
         group_labels <- c(paste("≤", round(median_val, 2)), paste(">", round(median_val, 2)))
       } else {
         if (!all(c(group1, group2) %in% unique(df[[outcome_var]]))) {
-          stop("Grupos selecionados não existem na variável de desfecho")
+          stop("Selected groups don't exist in the outcome variable")
         }
         df$outcome_binary <- ifelse(df[[outcome_var]] == group1, 0,
                                     ifelse(df[[outcome_var]] == group2, 1, NA))
@@ -413,11 +376,9 @@ HLAStcs <- function() {
 
       df <- df[!is.na(df$outcome_binary), ]
 
-      allele_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2")
+      allele_cols <- paste0(current_locus, c("_1", "_2"))
       df$allele_present <- as.integer(
-        df$A1 == allele_var | df$A2 == allele_var |
-          df$B1 == allele_var | df$B2 == allele_var |
-          df$DRB1_1 == allele_var | df$DRB1_2 == allele_var
+        df[[allele_cols[1]]] == allele_var | df[[allele_cols[2]]] == allele_var
       )
 
       if (!is.null(covariates)) {
@@ -425,7 +386,7 @@ HLAStcs <- function() {
 
         for (covar in covariates) {
           if (!covar %in% colnames(df)) {
-            stop(paste("Covariável não encontrada:", covar))
+            stop(paste("Covariate not found:", covar))
           }
 
           if (is.numeric(df[[covar]])) {
@@ -433,7 +394,7 @@ HLAStcs <- function() {
           } else {
             levels <- unique(na.omit(df[[covar]]))
             if (length(levels) != 2) {
-              stop(paste("Covariável categórica deve ter exatamente 2 níveis:", covar))
+              stop(paste("Categorical covariate must have exactly 2 levels:", covar))
             }
             clean_covars[[covar]] <- as.integer(df[[covar]] == levels[2])
           }
@@ -470,12 +431,12 @@ HLAStcs <- function() {
       results <- list(
         model = model,
         summary = data.frame(
-          Variável = c(allele_var, covariates),
+          Variable = c(allele_var, covariates),
           OR = round(or[-1], 4),
-          IC_95 = sapply(2:nrow(ci), function(i) {
+          CI_95 = sapply(2:nrow(ci), function(i) {
             paste0("(", round(ci[i, 1], 3), "-", round(ci[i, 2], 3), ")")
           }),
-          p_valor = ifelse(p_values < 0.0001, "<0.0001", round(p_values, 4)),
+          p_value = ifelse(p_values < 0.0001, "<0.0001", round(p_values, 4)),
           Pc = p_corrected,
           stringsAsFactors = FALSE,
           row.names = NULL
@@ -491,53 +452,53 @@ HLAStcs <- function() {
       return(results)
 
     }, error = function(e) {
-      stop(paste("Erro na regressão:", e$message))
+      stop(paste("Regression error:", e$message))
     })
   }
 
   ui <- fluidPage(
-    titlePanel("Análise HLA"),
+    useShinyjs(),
+    titlePanel("HLA Analysis"),
     sidebarLayout(
       sidebarPanel(
-        fileInput("file", "Carregar arquivo Excel", accept = c(".xlsx", ".xls")),
-        actionButton("analyze", "Analisar Dados", class = "btn-primary"),
-        downloadButton("download", "Exportar Resultados", class = "btn-success"),
-        helpText("Analise frequências alélicas, equilíbrio de Hardy-Weinberg, desequilíbrio de ligação e haplótipos completos.")
+        fileInput("file", "Load Excel file", accept = c(".xlsx", ".xls")),
+
+        h4("HLA Column Mapping"),
+        div(id = "loci_mapping",
+            uiOutput("loci_mapping_ui")
+        ),
+        fluidRow(
+          column(6, actionButton("add_locus", "Add Locus", icon = icon("plus"), width = "100%")),
+          column(6, actionButton("remove_locus", "Remove Locus", icon = icon("minus"), width = "100%"))
+        ),
+
+        actionButton("analyze", "Analyze Data", class = "btn-primary",
+                     style = "width: 100%; height: 50px; font-size: 16px;"),
+        helpText("Analyze allele frequencies, Hardy-Weinberg equilibrium, linkage disequilibrium and complete haplotypes.")
       ),
       mainPanel(
         tabsetPanel(
-          tabPanel("Resumo",
-                   verbatimTextOutput("summary"),
-                   uiOutput("errorMessage")),
-          tabPanel("Frequências",
-                   h3("Frequências HLA-A"),
-                   textOutput("freqSummaryA"),
-                   DTOutput("freqTableA"),
-                   h3("Frequências HLA-B"),
-                   textOutput("freqSummaryB"),
-                   DTOutput("freqTableB"),
-                   h3("Frequências HLA-DRB1"),
-                   textOutput("freqSummaryDRB1"),
-                   DTOutput("freqTableDRB1")),
+          tabPanel("Frequencies",
+                   uiOutput("freq_tables_ui")),
           tabPanel("Hardy-Weinberg",
                    tableOutput("hweTable"),
                    verbatimTextOutput("hweDetails")),
-          tabPanel("Desequilíbrio",
-                   h4("Resultados de Desequilíbrio de Ligação"),
+          tabPanel("Linkage Disequilibrium",
+                   h4("Linkage Disequilibrium Results"),
                    uiOutput("ldTabs")),
-          tabPanel("Haplótipos",
-                   h3("Haplótipos Completos (A-B-DRB1)"),
+          tabPanel("Haplotypes",
+                   h3("Complete Haplotypes"),
                    verbatimTextOutput("haplotypeSummary"),
                    DTOutput("haplotypeTable")),
-          tabPanel("Regressão Logística",
-                   h3("Análise de Regressão Logística"),
-                   selectInput("outcome_var", "Variável de Desfecho:", choices = NULL),
+          tabPanel("Logistic Regression",
+                   h3("Logistic Regression Analysis"),
+                   selectInput("outcome_var", "Outcome Variable:", choices = NULL),
                    uiOutput("group_selection_ui"),
-                   selectInput("allele_var", "Alelo para análise:", choices = NULL),
-                   uiOutput("covariate_selection_ui"),  # Novo UI dinâmico
-                   actionButton("run_regression", "Calcular", class = "btn-primary"),
+                   selectInput("allele_var", "Allele for analysis:", choices = NULL),
+                   uiOutput("covariate_selection_ui"),
+                   actionButton("run_regression", "Calculate", class = "btn-primary"),
                    tags$hr(),
-                   h4("Resultados:"),
+                   h4("Results:"),
                    verbatimTextOutput("regression_summary"),
                    tableOutput("regression_table"))
         )
@@ -549,133 +510,170 @@ HLAStcs <- function() {
     analysis_results <- reactiveValues()
     last_error <- reactiveVal(NULL)
 
-    output$summary <- renderPrint({
-      req(analysis_results$data)
-      cat("### Resumo da Análise HLA ###\n")
-      cat("Indivíduos analisados:", nrow(analysis_results$data), "\n")
-      cat("Loci analisados: A, B, DRB1\n")
-      cat("\nUse as outras abas para ver os resultados detalhados.")
+    loci_mapping <- reactiveVal(list())
+
+    observeEvent(input$add_locus, {
+      current <- loci_mapping()
+      new_id <- paste0("locus_", length(current) + 1)
+      current[[new_id]] <- list(locus = "", col1 = "", col2 = "")
+      loci_mapping(current)
     })
 
-    output$errorMessage <- renderUI({
-      if(!is.null(last_error())) {
-        tagList(
-          h4("Erro na análise:", style = "color:red;"),
-          p(last_error()),
-          p("Verifique o formato do arquivo e tente novamente.")
-        )
+    observeEvent(input$remove_locus, {
+      current <- loci_mapping()
+      if(length(current) > 0) {
+        current[[length(current)]] <- NULL
+        loci_mapping(current)
       }
     })
 
-    output$freqSummaryA <- renderText({
-      req(analysis_results$allele_freqs)
-      freq_table <- analysis_results$allele_freqs$A
-      if(is.null(freq_table)) return(NULL)
-      paste("Total de alelos únicos HLA-A:", nrow(freq_table))
+    output$loci_mapping_ui <- renderUI({
+      loci_list <- loci_mapping()
+      if(length(loci_list) == 0) return(NULL)
+
+      cols_available <- if(!is.null(analysis_results$raw_data)) {
+        colnames(analysis_results$raw_data)
+      } else {
+        character(0)
+      }
+
+      tagList(
+        lapply(names(loci_list), function(id) {
+          fluidRow(
+            column(4, textInput(paste0(id, "_name"), "Locus Name:",
+                                value = loci_list[[id]]$locus)),
+            column(4, selectInput(paste0(id, "_col1"), "Allele 1 Column:",
+                                  choices = cols_available,
+                                  selected = loci_list[[id]]$col1)),
+            column(4, selectInput(paste0(id, "_col2"), "Allele 2 Column:",
+                                  choices = cols_available,
+                                  selected = loci_list[[id]]$col2))
+          )
+        })
+      )
     })
 
-    output$freqSummaryB <- renderText({
-      req(analysis_results$allele_freqs)
-      freq_table <- analysis_results$allele_freqs$B
-      if(is.null(freq_table)) return(NULL)
-      paste("Total de alelos únicos HLA-B:", nrow(freq_table))
+    observeEvent(input$file, {
+      tryCatch({
+        hla_data <- read_hla_data(input$file$datapath)
+        analysis_results$raw_data <- hla_data$data
+
+        loci_mapping(list())
+
+      }, error = function(e) {
+        last_error(e$message)
+        showNotification(paste("Error:", e$message), type = "error", duration = 10)
+      })
     })
 
-    output$freqSummaryDRB1 <- renderText({
-      req(analysis_results$allele_freqs)
-      freq_table <- analysis_results$allele_freqs$DRB1
-      if(is.null(freq_table)) return(NULL)
-      paste("Total de alelos únicos HLA-DRB1:", nrow(freq_table))
+    observeEvent(input$analyze, {
+      req(analysis_results$raw_data)
+
+      tryCatch({
+        showModal(modalDialog("Processing data...", footer = NULL))
+
+        selected_loci <- c()
+        processed_data <- analysis_results$raw_data
+
+        loci_inputs <- reactiveValuesToList(input)
+        loci_inputs <- loci_inputs[grepl("^locus_", names(loci_inputs))]
+
+        for(id in names(loci_mapping())) {
+          locus_name <- input[[paste0(id, "_name")]]
+          col1 <- input[[paste0(id, "_col1")]]
+          col2 <- input[[paste0(id, "_col2")]]
+
+          if(!is.null(locus_name) && !is.null(col1) && !is.null(col2) &&
+             locus_name != "" && col1 != "" && col2 != "") {
+            if(!all(c(col1, col2) %in% colnames(processed_data))) {
+              stop(paste("Columns", col1, "or", col2, "not found in data"))
+            }
+
+            colnames(processed_data)[colnames(processed_data) == col1] <- paste0(locus_name, "_1")
+            colnames(processed_data)[colnames(processed_data) == col2] <- paste0(locus_name, "_2")
+            selected_loci <- c(selected_loci, locus_name)
+          }
+        }
+
+        if(length(selected_loci) == 0) {
+          stop("No valid loci were mapped. Please add at least one locus.")
+        }
+
+        allele_freqs <- calculate_allele_frequencies(processed_data, selected_loci)
+        hwe_results <- test_hwe(processed_data, selected_loci)
+        ld_result <- calculate_all_ld(processed_data, selected_loci)
+        haplotype_result <- calculate_complete_haplotypes(processed_data, selected_loci)
+
+        analysis_results$data <- processed_data
+        analysis_results$allele_freqs <- allele_freqs
+        analysis_results$hwe_results <- hwe_results
+        analysis_results$ld_result <- ld_result
+        analysis_results$haplotype_result <- haplotype_result
+        analysis_results$selected_loci <- selected_loci
+
+        removeModal()
+        showNotification("Analysis complete!", type = "message")
+
+      }, error = function(e) {
+        removeModal()
+        last_error(e$message)
+        showNotification(paste("Error:", e$message), type = "error", duration = 10)
+      })
     })
 
-    output$freqTableA <- renderDT({
-      req(analysis_results$allele_freqs)
-      freq_table <- analysis_results$allele_freqs$A
-      if(is.null(freq_table)) return(NULL)
+    output$freq_tables_ui <- renderUI({
+      req(analysis_results$allele_freqs, analysis_results$selected_loci)
 
-      datatable(
-        freq_table,
-        colnames = c("Alelo", "Contagem", "Frequência (%)"),
-        options = list(
-          pageLength = 10,
-          lengthMenu = c(10, 25, 50, 100, "All"),
-          dom = 'Blfrtip',
-          buttons = c('copy', 'csv', 'excel'),
-          ordering = TRUE,
-          order = list(2, 'desc')
-        ),
-        rownames = FALSE,
-        extensions = 'Buttons',
-        selection = 'none'
-      ) %>%
-        formatRound("Percentage", 2) %>%
-        formatStyle(
-          'Percentage',
-          background = styleColorBar(freq_table$Percentage, 'lightblue'),
-          backgroundSize = '98% 88%',
-          backgroundRepeat = 'no-repeat',
-          backgroundPosition = 'center'
-        )
+      tagList(
+        lapply(analysis_results$selected_loci, function(locus) {
+          tagList(
+            h3(paste("Frequencies", locus)),
+            textOutput(paste0("freqSummary_", locus)),
+            DTOutput(paste0("freqTable_", locus))
+          )
+        })
+      )
     })
 
-    output$freqTableB <- renderDT({
-      req(analysis_results$allele_freqs)
-      freq_table <- analysis_results$allele_freqs$B
-      if(is.null(freq_table)) return(NULL)
+    observe({
+      req(analysis_results$allele_freqs, analysis_results$selected_loci)
 
-      datatable(
-        freq_table,
-        colnames = c("Alelo", "Contagem", "Frequência (%)"),
-        options = list(
-          pageLength = 10,
-          lengthMenu = c(10, 25, 50, 100, "All"),
-          dom = 'Blfrtip',
-          buttons = c('copy', 'csv', 'excel'),
-          ordering = TRUE,
-          order = list(2, 'desc')
-        ),
-        rownames = FALSE,
-        extensions = 'Buttons',
-        selection = 'none'
-      ) %>%
-        formatRound("Percentage", 2) %>%
-        formatStyle(
-          'Percentage',
-          background = styleColorBar(freq_table$Percentage, 'lightblue'),
-          backgroundSize = '98% 88%',
-          backgroundRepeat = 'no-repeat',
-          backgroundPosition = 'center'
-        )
-    })
+      for(locus in analysis_results$selected_loci) {
+        local({
+          local_locus <- locus
+          freq_table <- analysis_results$allele_freqs[[local_locus]]
 
-    output$freqTableDRB1 <- renderDT({
-      req(analysis_results$allele_freqs)
-      freq_table <- analysis_results$allele_freqs$DRB1
-      if(is.null(freq_table)) return(NULL)
+          output[[paste0("freqSummary_", local_locus)]] <- renderText({
+            paste("Total unique alleles", local_locus, ":", nrow(freq_table))
+          })
 
-      datatable(
-        freq_table,
-        colnames = c("Alelo", "Contagem", "Frequência (%)"),
-        options = list(
-          pageLength = 10,
-          lengthMenu = c(10, 25, 50, 100, "All"),
-          dom = 'Blfrtip',
-          buttons = c('copy', 'csv', 'excel'),
-          ordering = TRUE,
-          order = list(2, 'desc')
-        ),
-        rownames = FALSE,
-        extensions = 'Buttons',
-        selection = 'none'
-      ) %>%
-        formatRound("Percentage", 2) %>%
-        formatStyle(
-          'Percentage',
-          background = styleColorBar(freq_table$Percentage, 'lightblue'),
-          backgroundSize = '98% 88%',
-          backgroundRepeat = 'no-repeat',
-          backgroundPosition = 'center'
-        )
+          output[[paste0("freqTable_", local_locus)]] <- renderDT({
+            datatable(
+              freq_table,
+              colnames = c("Allele", "Count", "Frequency (%)"),
+              options = list(
+                pageLength = 10,
+                lengthMenu = c(10, 25, 50, 100, "All"),
+                dom = 'Blfrtip',
+                buttons = c('copy', 'csv', 'excel'),
+                ordering = TRUE,
+                order = list(2, 'desc')
+              ),
+              rownames = FALSE,
+              extensions = 'Buttons',
+              selection = 'none'
+            ) %>%
+              formatRound("Percentage", 2) %>%
+              formatStyle(
+                'Percentage',
+                background = styleColorBar(freq_table$Percentage, 'lightblue'),
+                backgroundSize = '98% 88%',
+                backgroundRepeat = 'no-repeat',
+                backgroundPosition = 'center'
+              )
+          })
+        })
+      }
     })
 
     output$hweTable <- renderTable({
@@ -688,8 +686,8 @@ HLAStcs <- function() {
           "Chi-Sq" = x$chisq,
           "p-value" = x$p.value,
           "df" = x$df,
-          "Alelos" = x$n_alleles,
-          "Indivíduos" = x$n_individuals,
+          "Alleles" = x$n_alleles,
+          "Individuals" = x$n_individuals,
           check.names = FALSE
         )
       })
@@ -704,7 +702,7 @@ HLAStcs <- function() {
         cat("\n=== Locus", locus, "===\n")
         x <- analysis_results$hwe_results[[locus]]
 
-        cat("\nTeste de Hardy-Weinberg:\n")
+        cat("\nHardy-Weinberg Test:\n")
         cat("Chi-Sq =", x$chisq, ", df =", x$df, ", p-value =", x$p.value, "\n")
       }
     })
@@ -716,7 +714,7 @@ HLAStcs <- function() {
         tabPanel(
           pair_name,
           verbatimTextOutput(paste0("ldResults_", pair_name)),
-          h4("Detalhes por Par de Alelos"),
+          h4("Allele Pair Details"),
           DTOutput(paste0("ldDetailsTable_", pair_name))
         )
       })
@@ -733,14 +731,14 @@ HLAStcs <- function() {
           ld_data <- analysis_results$ld_result[[local_pair_name]]
 
           output[[paste0("ldResults_", local_pair_name)]] <- renderPrint({
-            cat("### Desequilíbrio de Ligação ###\n")
-            cat("Entre", ld_data$locus1, "e", ld_data$locus2, "\n\n")
-            cat("Indivíduos analisados:", ld_data$n_individuals, "\n")
-            cat("Média de |D'|:", round(ld_data$mean_D_prime, 4), "\n")
-            cat("Média de r²:", round(ld_data$mean_r_squared, 4), "\n\n")
-            cat("Interpretação:\n")
-            cat("- D' varia de -1 a 1, com |D'| > 0.8 indicando desequilíbrio forte\n")
-            cat("- r² varia de 0 a 1, com r² > 0.33 indicando desequilíbrio forte\n")
+            cat("### Linkage Disequilibrium ###\n")
+            cat("Between", ld_data$locus1, "and", ld_data$locus2, "\n\n")
+            cat("Individuals analyzed:", ld_data$n_individuals, "\n")
+            cat("Mean |D'|:", round(ld_data$mean_D_prime, 4), "\n")
+            cat("Mean r²:", round(ld_data$mean_r_squared, 4), "\n\n")
+            cat("Interpretation:\n")
+            cat("- D' ranges from -1 to 1, with |D'| > 0.8 indicating strong disequilibrium\n")
+            cat("- r² ranges from 0 to 1, with r² > 0.33 indicating strong disequilibrium\n")
           })
 
           output[[paste0("ldDetailsTable_", local_pair_name)]] <- renderDT({
@@ -764,11 +762,11 @@ HLAStcs <- function() {
 
     output$haplotypeSummary <- renderPrint({
       req(analysis_results$haplotype_result)
-      cat("### Resumo de Haplótipos Completos ###\n")
-      cat("Loci analisados: A-B-DRB1\n")
-      cat("Indivíduos analisados:", analysis_results$haplotype_result$n_individuals, "\n")
-      cat("Haplótipos únicos encontrados:", analysis_results$haplotype_result$n_haplotypes, "\n")
-      cat("\nOs haplótipos são estimados considerando fase desconhecida (todas as combinações possíveis).\n")
+      cat("### Complete Haplotypes Summary ###\n")
+      cat("Analyzed loci:", paste(analysis_results$haplotype_result$loci, collapse = "-"), "\n")
+      cat("Individuals analyzed:", analysis_results$haplotype_result$n_individuals, "\n")
+      cat("Unique haplotypes found:", analysis_results$haplotype_result$n_haplotypes, "\n")
+      cat("\nHaplotypes are estimated considering unknown phase (all possible combinations).\n")
     })
 
     output$haplotypeTable <- renderDT({
@@ -787,109 +785,21 @@ HLAStcs <- function() {
         extensions = 'Buttons',
         selection = 'none'
       ) %>%
-        formatRound(columns = c("Frequência", "Porcentagem"), digits = 4) %>%
+        formatRound(columns = c("Frequency", "Percentage"), digits = 4) %>%
         formatStyle(
-          'Porcentagem',
-          background = styleColorBar(analysis_results$haplotype_result$haplotype_counts$Porcentagem, 'lightgreen'),
+          'Percentage',
+          background = styleColorBar(analysis_results$haplotype_result$haplotype_counts$Percentage, 'lightgreen'),
           backgroundSize = '98% 88%',
           backgroundRepeat = 'no-repeat',
           backgroundPosition = 'center'
         )
     })
 
-    observeEvent(input$analyze, {
-      req(input$file)
-
-      tryCatch({
-        last_error(NULL)
-        showModal(modalDialog("Processando dados...", footer = NULL))
-
-        hla_data <- read_hla_data(input$file$datapath)
-
-        allele_freqs <- calculate_allele_frequencies(hla_data$alleles)
-
-        hwe_results <- test_hwe(hla_data$data)
-
-        ld_result <- calculate_all_ld(hla_data$data)
-
-        haplotype_result <- calculate_complete_haplotypes(hla_data$data)
-
-        analysis_results$data <- hla_data$data
-        analysis_results$allele_freqs <- allele_freqs
-        analysis_results$hwe_results <- hwe_results
-        analysis_results$ld_result <- ld_result
-        analysis_results$haplotype_result <- haplotype_result
-
-        removeModal()
-        showNotification("Análise concluída!", type = "message")
-
-      }, error = function(e) {
-        removeModal()
-        last_error(e$message)
-        showNotification(paste("Erro:", e$message), type = "error", duration = 10)
-      })
-    })
-
-    output$download <- downloadHandler(
-      filename = function() {
-        paste("hla_results_", format(Sys.time(), "%Y%m%d_%H%M"), ".xlsx", sep = "")
-      },
-      content = function(file) {
-        wb <- createWorkbook()
-
-        addWorksheet(wb, "Frequencias")
-        writeData(wb, "Frequencias", do.call(rbind, analysis_results$allele_freqs), rowNames = TRUE)
-
-        hwe_df <- data.frame(
-          Locus = names(analysis_results$hwe_results),
-          ChiSq = sapply(analysis_results$hwe_results, function(x) x$chisq),
-          p.value = sapply(analysis_results$hwe_results, function(x) x$p.value),
-          df = sapply(analysis_results$hwe_results, function(x) x$df),
-          n_alleles = sapply(analysis_results$hwe_results, function(x) x$n_alleles),
-          n_individuals = sapply(analysis_results$hwe_results, function(x) x$n_individuals)
-        )
-        addWorksheet(wb, "Hardy-Weinberg")
-        writeData(wb, "Hardy-Weinberg", hwe_df)
-
-        hwe_details <- list()
-        for(locus in names(analysis_results$hwe_results)) {
-          x <- analysis_results$hwe_results[[locus]]
-          hwe_details[[paste0(locus, "_observed")]] <- as.data.frame(x$observed)
-          hwe_details[[paste0(locus, "_expected")]] <- as.data.frame(x$expected)
-        }
-        addWorksheet(wb, "HWE_Detalhes")
-        writeData(wb, "HWE_Detalhes", hwe_details, rowNames = TRUE)
-
-        addWorksheet(wb, "Desequilíbrio")
-        ld_summary <- data.frame(
-          Par = names(analysis_results$ld_result),
-          Locus1 = sapply(analysis_results$ld_result, function(x) x$locus1),
-          Locus2 = sapply(analysis_results$ld_result, function(x) x$locus2),
-          Mean_D_prime = sapply(analysis_results$ld_result, function(x) x$mean_D_prime),
-          Mean_r_squared = sapply(analysis_results$ld_result, function(x) x$mean_r_squared),
-          N_Indivíduos = sapply(analysis_results$ld_result, function(x) x$n_individuals)
-        )
-        writeData(wb, "Desequilíbrio", ld_summary)
-
-        addWorksheet(wb, "Haplótipos")
-        writeData(wb, "Haplótipos", data.frame(
-          N_Indivíduos = analysis_results$haplotype_result$n_individuals,
-          N_Haplótipos = analysis_results$haplotype_result$n_haplotypes
-        ), startRow = 1)
-
-        writeData(wb, "Haplótipos", analysis_results$haplotype_result$haplotype_counts, startRow = 5)
-
-        addWorksheet(wb, "Dados_Originais")
-        writeData(wb, "Dados_Originais", analysis_results$data)
-
-        saveWorkbook(wb, file)
-      }
-    )
     observe({
       req(analysis_results$data)
       data <- analysis_results$data
 
-      hla_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2")
+      hla_cols <- unlist(lapply(analysis_results$selected_loci, function(l) paste0(l, c("_1", "_2"))))
       outcome_options <- setdiff(colnames(data), hla_cols)
       updateSelectInput(session, "outcome_var", choices = outcome_options)
 
@@ -897,7 +807,7 @@ HLAStcs <- function() {
       allele_options <- allele_options[!is.na(allele_options) & allele_options != ""]
       updateSelectInput(session, "allele_var", choices = sort(allele_options))
 
-      covar_options <- setdiff(colnames(data), c(hla_cols, outcome_options))
+      covar_options <- setdiff(colnames(data), c(hla_cols, input$outcome_var))
       updateSelectInput(session, "covariates", choices = covar_options)
     })
 
@@ -910,18 +820,18 @@ HLAStcs <- function() {
       if (is.numeric(data[[input$outcome_var]])) {
         median_val <- median(data[[input$outcome_var]], na.rm = TRUE)
         tagList(
-          helpText(paste("Variável numérica - divisão pela mediana (", round(median_val, 2), "):")),
-          textInput("group1_name", "Grupo 1 (Referência):",
+          helpText(paste("Numeric variable - split by median (", round(median_val, 2), "):")),
+          textInput("group1_name", "Group 1 (Reference):",
                     value = paste("≤", round(median_val, 2))),
-          textInput("group2_name", "Grupo 2 (Comparação):",
+          textInput("group2_name", "Group 2 (Comparison):",
                     value = paste(">", round(median_val, 2)))
         )
       } else {
         values <- unique(data[[input$outcome_var]])
         values <- values[!is.na(values)]
         tagList(
-          selectInput("group1", "Grupo 1 (Referência):", choices = values),
-          selectInput("group2", "Grupo 2 (Comparação):", choices = values,
+          selectInput("group1", "Group 1 (Reference):", choices = values),
+          selectInput("group2", "Group 2 (Comparison):", choices = values,
                       selected = ifelse(length(values) >= 2, values[2], values[1]))
         )
       }
@@ -952,16 +862,16 @@ HLAStcs <- function() {
       req(regression_results())
       res <- regression_results()
 
-      cat("=== REGRESSÃO LOGÍSTICA ===\n")
-      cat("Alelo analisado:", res$allele, "\n")
-      cat("Grupo de referência (0):", res$groups[1], "\n")
-      cat("Grupo de comparação (1):", res$groups[2], "\n")
-      cat("Amostra utilizada:", res$n, "indivíduos\n")
-      cat("AIC (Critério de Informação de Akaike):", round(res$aic, 2), "\n\n")
-      cat("Método: Modelo linear generalizado (família binomial)\n")
-      cat("Interpretação do AIC:\n")
-      cat("- Quanto menor o AIC, melhor o modelo\n")
-      cat("- Diferenças >2 entre modelos são consideradas significativas\n")
+      cat("=== LOGISTIC REGRESSION ===\n")
+      cat("Analyzed allele:", res$allele, "\n")
+      cat("Reference group (0):", res$groups[1], "\n")
+      cat("Comparison group (1):", res$groups[2], "\n")
+      cat("Sample used:", res$n, "individuals\n")
+      cat("AIC (Akaike Information Criterion):", round(res$aic, 2), "\n\n")
+      cat("Method: Generalized linear model (binomial family)\n")
+      cat("AIC interpretation:\n")
+      cat("- Lower AIC indicates better model\n")
+      cat("- Differences >2 between models are considered significant\n")
     })
 
     output$regression_table <- renderTable({
@@ -970,23 +880,23 @@ HLAStcs <- function() {
 
       model_summary <- res$summary
 
-      model_summary$Variável <- gsub("_", " ", model_summary$Variável)
-      model_summary$Variável <- tools::toTitleCase(model_summary$Variável)
+      model_summary$Variable <- gsub("_", " ", model_summary$Variable)
+      model_summary$Variable <- tools::toTitleCase(model_summary$Variable)
 
-      model_summary <- model_summary[, c("Variável", "OR", "IC_95", "p_valor", "Pc")]
+      model_summary <- model_summary[, c("Variable", "OR", "CI_95", "p_value", "Pc")]
 
       aic_row <- data.frame(
-        Variável = "AIC do Modelo",
+        Variable = "Model AIC",
         OR = round(res$aic, 2),
-        IC_95 = "",
-        p_valor = "",
+        CI_95 = "",
+        p_value = "",
         Pc = ""
       )
 
       final_table <- rbind(model_summary, aic_row)
 
       output$regression_note <- renderText({
-        paste("Correção de Bonferroni aplicada multiplicando pelo número de alelos no locus (n =",
+        paste("Bonferroni correction applied by multiplying by number of alleles in locus (n =",
               res$n_alleles, ")")
       })
 
@@ -997,7 +907,7 @@ HLAStcs <- function() {
       req(analysis_results$data, input$outcome_var)
 
       data <- analysis_results$data
-      hla_cols <- c("A1", "A2", "B1", "B2", "DRB1_1", "DRB1_2")
+      hla_cols <- unlist(lapply(analysis_results$selected_loci, function(l) paste0(l, c("_1", "_2"))))
 
       covar_options <- setdiff(
         colnames(data),
@@ -1009,18 +919,18 @@ HLAStcs <- function() {
       })]
 
       if (length(covar_options) == 0) {
-        return(helpText("Nenhuma covariável adequada encontrada (precisa ser numérica ou binária)"))
+        return(helpText("No suitable covariates found (must be numeric or binary)"))
       }
 
       var_types <- sapply(data[, covar_options], function(x) {
-        if (is.numeric(x)) " (numérico)" else " (binário)"
+        if (is.numeric(x)) " (numeric)" else " (binary)"
       })
 
       choices <- setNames(covar_options, paste0(covar_options, var_types))
 
       checkboxGroupInput(
         "covariates",
-        "Selecione as covariáveis:",
+        "Select covariates:",
         choices = choices,
         inline = FALSE
       )
