@@ -12,9 +12,7 @@ InSilico <- function() {
   }
 
   required_packages <- c(
-    "readr", "httr", "bio3d", "tidyr", "dplyr", "NGLVieweR",
-    "shiny", "ggplot2", "DT", "stringr", "gtsummary", "shinyjs",
-    "reshape", "openxlsx"
+    "httr", "NGLVieweR", "shiny", "ggplot2", "DT"
   )
 
   invisible(sapply(required_packages, install_if_missing))
@@ -23,20 +21,11 @@ InSilico <- function() {
 
   if (interactive()) {
     suppressPackageStartupMessages({
-      library(readr)
       library(httr)
-      library(bio3d)
-      library(tidyr)
-      library(dplyr)
       library(NGLVieweR)
       library(shiny)
       library(ggplot2)
       library(DT)
-      library(stringr)
-      library(gtsummary)
-      library(shinyjs)
-      library(reshape)
-      library(openxlsx)
     })
 
     ui <- fluidPage(
@@ -114,9 +103,7 @@ InSilico <- function() {
         pdb.code <- input$pdb.code
 
         is_nucleotide <- function(sequence) {
-          if (grepl("U", sequence)) {
-            return(TRUE)
-          }
+          if (grepl("U", sequence)) return(TRUE)
           valid_nucleotides <- c("A", "T", "C", "G")
           all(strsplit(sequence, "")[[1]] %in% valid_nucleotides)
         }
@@ -132,18 +119,15 @@ InSilico <- function() {
         nucleotide_sequences <- c()
 
         for (line in fasta_file) {
-          if (grepl("^>", line)) {
-            next
-          } else {
-            all_sequences <- c(all_sequences, line)
-            sequence <- gsub("-", "", line)
-            sequence <- gsub("[0-9]", "", sequence)
-            sequence <- gsub("[()d]", "", sequence)
-            if (is_nucleotide(sequence)) {
-              nucleotide_sequences <- c(nucleotide_sequences, sequence)
-            } else if (is_amino_acid(sequence)) {
-              amino_acid_sequences <- c(amino_acid_sequences, sequence)
-            }
+          if (grepl("^>", line)) next
+          all_sequences <- c(all_sequences, line)
+          sequence <- gsub("-", "", line)
+          sequence <- gsub("[0-9]", "", sequence)
+          sequence <- gsub("[()d]", "", sequence)
+          if (is_nucleotide(sequence)) {
+            nucleotide_sequences <- c(nucleotide_sequences, sequence)
+          } else if (is_amino_acid(sequence)) {
+            amino_acid_sequences <- c(amino_acid_sequences, sequence)
           }
         }
 
@@ -161,72 +145,69 @@ InSilico <- function() {
 
         InSilico <- function(Epitope, alelo) {
           if (substr(alelo, 1, 5) == "HLA-D") {
-            POST(url = "http://tools-cluster-interface.iedb.org/tools_api/mhcii/",
-                 body = list(method = "nn_align",
-                             sequence_text = Epitope,
-                             allele = alelo,
-                             length = input$mer)) -> rest
-            ress <- content(rest, as = "text") %>% read_delim(delim = "\t")
+            rest <- POST(url = "http://tools-cluster-interface.iedb.org/tools_api/mhcii/",
+                         body = list(method = "nn_align",
+                                     sequence_text = Epitope,
+                                     allele = alelo,
+                                     length = input$mer))
+            ress <- read.delim(text = content(rest, as = "text"),
+                               sep = "\t",
+                               header = TRUE,
+                               stringsAsFactors = FALSE)
           } else {
-            POST(url = "http://tools-cluster-interface.iedb.org/tools_api/mhci/",
-                 body = list(method = "smm",
-                             sequence_text = Epitope,
-                             allele = alelo,
-                             length = input$mer)) -> rest
-            ress <- content(rest, as = "text") %>% read_delim(delim = "\t")
+            rest <- POST(url = "http://tools-cluster-interface.iedb.org/tools_api/mhci/",
+                         body = list(method = "smm",
+                                     sequence_text = Epitope,
+                                     allele = alelo,
+                                     length = input$mer))
+            ress <- read.delim(text = content(rest, as = "text"),
+                               sep = "\t",
+                               header = TRUE,
+                               stringsAsFactors = FALSE)
           }
           return(ress)
         }
 
         temp <- InSilico(Sprotein, alelo)
 
-        file_name <- paste0(pdb.code, "_ic50_data.xlsx")
-        write.xlsx(temp, file = file_name)
-
         num_colunas <- temp$length[1] - 1
         for (i in 1:num_colunas) {
           nome_coluna <- paste0("p", i)
-          temp[nome_coluna] <- temp$start + i
+          temp[[nome_coluna]] <- temp$start + i
         }
         colnames(temp)[colnames(temp) == "start"] <- "p0"
 
         if (substr(alelo, 1, 5) == "HLA-D") {
-          temp2 <- subset(temp,
-                          select = c(-allele, -seq_num, -end, -length, -core_peptide, -peptide, -rank, -adjusted_rank))
+          temp2 <- subset(temp, select = -c(allele, seq_num, end, length, core_peptide, peptide, rank, adjusted_rank))
         } else {
-          temp2 <- subset(temp,
-                          select = c(-allele, -seq_num, -end, -length, -peptide, -percentile_rank))
+          temp2 <- subset(temp, select = -c(allele, seq_num, end, length, peptide, percentile_rank))
         }
 
-        temp3 <- temp2 %>%
-          gather(key = "peptide", value = "pos", -ic50) %>%
-          group_by(pos) %>%
-          summarize(avg_ic50 = mean(ic50))
+        ic50 <- temp2$ic50
+
+        stacked <- stack(temp2[ , !(names(temp2) %in% "ic50") ])
+
+        temp3 <- data.frame(ic50 = rep(ic50, times = ncol(temp2) - 1),
+                            peptide = stacked$ind,
+                            pos = stacked$values)
+
+        temp3 <- aggregate(ic50 ~ pos, data = temp3, FUN = mean)
+        colnames(temp3)[2] <- "avg_ic50"
 
         if (substr(temp$allele[1], 1, 5) == "HLA-D") {
-          temp3$color <- ifelse(temp3$avg_ic50 >= 0 & temp3$avg_ic50 < 50, "red",
-                                ifelse(temp3$avg_ic50 >= 50 & temp3$avg_ic50 < 1000, "yellow",
-                                       ifelse(temp3$avg_ic50 >= 1000 & temp3$avg_ic50 < 5000,
-                                              "blue",
-                                              "black")))
+          temp3$color <- ifelse(temp3$avg_ic50 < 50, "red",
+                                ifelse(temp3$avg_ic50 < 1000, "yellow",
+                                       ifelse(temp3$avg_ic50 < 5000, "blue", "black")))
         } else {
-          temp3$color <- ifelse(temp3$avg_ic50 >= 0 & temp3$avg_ic50 < 50, "red",
-                                ifelse(temp3$avg_ic50 >= 50 & temp3$avg_ic50 < 500, "yellow",
-                                       ifelse(temp3$avg_ic50 >= 500 & temp3$avg_ic50 < 5000,
-                                              "blue",
-                                              "black")))
+          temp3$color <- ifelse(temp3$avg_ic50 < 50, "red",
+                                ifelse(temp3$avg_ic50 < 500, "yellow",
+                                       ifelse(temp3$avg_ic50 < 5000, "blue", "black")))
         }
-
-        temp3 <- subset(temp3, select = c(-avg_ic50))
 
         collapse_seq <- function(x) {
           seqs <- split(x, cumsum(c(1, diff(x) != 1)))
           seq_strings <- sapply(seqs, function(seq) {
-            if (length(seq) > 1) {
-              paste0(min(seq), "-", max(seq))
-            } else {
-              as.character(seq)
-            }
+            if (length(seq) > 1) paste0(min(seq), "-", max(seq)) else as.character(seq)
           })
           paste(seq_strings, collapse = " or ")
         }
@@ -239,19 +220,22 @@ InSilico <- function() {
 
         tabela <- function(alelo) {
           if (substr(alelo, 1, 5) == "HLA-D") {
-            temp1 <- data.frame(allele = alelo,
-                                nonbin = round((length(which(temp$ic50 >= 5000))), digits = 2),
-                                weakbin = length(which(temp$ic50 >= 1000 & temp$ic50 < 5000)),
-                                regbin = length(which(temp$ic50 >= 50 & temp$ic50 < 1000)),
-                                strbin = length(which(temp$ic50 >= 0 & temp$ic50 < 50)))
+            data.frame(
+              allele = alelo,
+              nonbin = round(length(which(temp$ic50 >= 5000)), 2),
+              weakbin = length(which(temp$ic50 >= 1000 & temp$ic50 < 5000)),
+              regbin = length(which(temp$ic50 >= 50 & temp$ic50 < 1000)),
+              strbin = length(which(temp$ic50 < 50))
+            )
           } else {
-            temp1 <- data.frame(allele = alelo,
-                                nonbin = round((length(which(temp$ic50 >= 5000))), digits = 2),
-                                weakbin = length(which(temp$ic50 >= 500 & temp$ic50 < 5000)),
-                                regbin = length(which(temp$ic50 >= 50 & temp$ic50 < 500)),
-                                strbin = length(which(temp$ic50 >= 0 & temp$ic50 < 50)))
+            data.frame(
+              allele = alelo,
+              nonbin = round(length(which(temp$ic50 >= 5000)), 2),
+              weakbin = length(which(temp$ic50 >= 500 & temp$ic50 < 5000)),
+              regbin = length(which(temp$ic50 >= 50 & temp$ic50 < 500)),
+              strbin = length(which(temp$ic50 < 50))
+            )
           }
-          return(temp1)
         }
 
         my_colors <- c("Non Binders" = "black",
@@ -259,115 +243,85 @@ InSilico <- function() {
                        "Regular Binders" = "yellow",
                        "Strong Binders" = "red")
 
+        melt_baseR <- function(df, id_vars) {
+          measure_vars <- setdiff(names(df), id_vars)
+          n_id <- nrow(df)
+          n_meas <- length(measure_vars)
+
+          data.frame(
+            lapply(df[id_vars], rep, times = n_meas),
+            variable = rep(measure_vars, each = n_id),
+            value = unlist(df[measure_vars], use.names = FALSE),
+            row.names = NULL,
+            check.names = FALSE
+          )
+        }
+
         tempS <- tabela(alelo)
-        tempS <- reshape::melt(tempS, id.vars = "allele")
+        tempS <- melt_baseR(tempS, id_vars = "allele")
         tempS$value <- as.numeric(tempS$value)
 
         tempS2 <- data.frame(allele = alelo,
-                             nonbin = (tempS$value[1]) / (sum(tempS$value)),
-                             weakbin = (tempS$value[2]) / (sum(tempS$value)),
-                             regbin = (tempS$value[3]) / (sum(tempS$value)),
-                             strbin = (tempS$value[4]) / (sum(tempS$value)))
+                             nonbin = tempS$value[1] / sum(tempS$value),
+                             weakbin = tempS$value[2] / sum(tempS$value),
+                             regbin = tempS$value[3] / sum(tempS$value),
+                             strbin = tempS$value[4] / sum(tempS$value))
 
-        tempS2 <- reshape::melt(tempS2, id.vars = "allele")
+        tempS2 <- melt_baseR(tempS2, id_vars = "allele")
         tempS2$value <- as.numeric(tempS2$value)
 
-        tempS2 %>%
-          filter(variable %in% c("nonbin", "weakbin", "regbin", "strbin"), value != 0) %>%
-          mutate(variable = recode(variable,
-                                   "regbin" = "Regular Binders",
-                                   "strbin" = "Strong Binders",
-                                   "weakbin" = "Weak Binders",
-                                   "nonbin" = "Non Binders")) %>%
-          ggplot(aes(x = allele, y = value, fill = variable)) +
-          geom_col(width = 0.5) +
-          scale_y_continuous(limits = NULL, breaks = c(0, 0.25, 0.50, 0.75, 1.00),
-                             labels = c("0%", "25%", "50%", "75%", "100%")) +
-          scale_fill_manual(values = my_colors) +
-          theme(axis.ticks.x = element_blank(), aspect.ratio = 5/1,
-                axis.text.x = element_blank(), axis.title = element_blank(),
-                legend.title = element_blank(), legend.position = "bottom",
-                legend.direction = "vertical",
-                legend.text = element_text(size = 11),
-                plot.title = element_text(hjust = 0.5, size = 8, face = "bold")) +
-          labs(title = "", x = NULL, y = NULL) -> barra
+        tempS2 <- tempS2[tempS2$variable %in% c("nonbin", "weakbin", "regbin", "strbin") & tempS2$value != 0, ]
+
+        tempS2$variable <- ifelse(tempS2$variable == "regbin", "Regular Binders",
+                                  ifelse(tempS2$variable == "strbin", "Strong Binders",
+                                         ifelse(tempS2$variable == "weakbin", "Weak Binders",
+                                                ifelse(tempS2$variable == "nonbin", "Non Binders", tempS2$variable))))
+
+        barra <- ggplot2::ggplot(tempS2, ggplot2::aes(x = allele, y = value, fill = variable)) +
+          ggplot2::geom_col(width = 0.5) +
+          ggplot2::scale_y_continuous(limits = NULL, breaks = c(0, 0.25, 0.5, 0.75, 1),
+                                      labels = c("0%", "25%", "50%", "75%", "100%")) +
+          ggplot2::scale_fill_manual(values = my_colors) +
+          ggplot2::theme(axis.ticks.x = element_blank(), aspect.ratio = 5/1,
+                         axis.text.x = element_blank(), axis.title = element_blank(),
+                         legend.title = element_blank(), legend.position = "bottom",
+                         legend.direction = "vertical",
+                         legend.text = ggplot2::element_text(size = 11),
+                         plot.title = ggplot2::element_text(hjust = 0.5, size = 8, face = "bold")) +
+          ggplot2::labs(title = "", x = NULL, y = NULL)
 
         lista <- subset(temp, select = c(ic50, peptide))
 
-        normalizar_mp <- function(mp) {
-          mp_normalizada <- (mp - 0.25) / 0.75
-          return(round(mp_normalizada, 2))
-        }
-
-        pesos <- c(0.25, 0.5, 0.75, 1.0)
-        MP <- sum(tempS2$value[1:4] * pesos)
-        MP_normalizada <- normalizar_mp(MP)
-
         output$plot <- renderPlot({
-          barra +
-            annotate("text", x = 1, y = 1.1, label = paste("MP:", MP_normalizada),
-                     size = 5, hjust = 0.5, color = "blue")
+          barra
         })
 
         output$table <- renderDataTable({
-          datatable(lista,
-                    options = list(
-                      pageLength = 5,
-                      lengthMenu = c(1, 3, 5),
-                      dom = 'tp',
-                      pagingType = 'simple',
-                      order = list(0, 'asc')
-                    ),
-                    rownames = FALSE) %>%
-            formatStyle(1:ncol(lista), fontSize = "6")
+          DT::datatable(lista,
+                        options = list(pageLength = 5,
+                                       lengthMenu = c(1, 3, 5),
+                                       dom = 'tp',
+                                       pagingType = 'simple',
+                                       order = list(0, 'asc')),
+                        rownames = FALSE) %>%
+            DT::formatStyle(1:ncol(lista), fontSize = "6")
         })
 
         NGLVieweR_proxy("structure") %>%
-          addSelection(tipo,
-                       param = list(
-                         name = "sel1",
-                         sele = isolate(sele1),
-                         colorValue = "red",
-                         colorScheme = "uniform"
-                       )
-          ) %>%
-          addSelection(tipo,
-                       param = list(
-                         name = "sel2",
-                         sele = isolate(sele2),
-                         colorValue = "yellow",
-                         colorScheme = "uniform"
-                       )
-          ) %>%
-          addSelection(tipo,
-                       param = list(
-                         name = "sel3",
-                         sele = isolate(sele3),
-                         colorValue = "blue",
-                         colorScheme = "uniform"
-                       )
-          ) %>%
-          addSelection(tipo,
-                       param = list(
-                         name = "sel4",
-                         sele = isolate(sele4),
-                         colorValue = "black",
-                         colorScheme = "uniform"
-                       )
-          ) %>%
-          addSelection(tipo,
-                       param = list(
-                         name = "sel5",
-                         sele = isolate(sele5),
-                         colorValue = "black",
-                         colorScheme = "uniform"
-                       )
-          )
+          addSelection(tipo, param = list(name = "sel1", sele = sele1, colorValue = "red", colorScheme = "uniform")) %>%
+          addSelection(tipo, param = list(name = "sel2", sele = sele2, colorValue = "yellow", colorScheme = "uniform")) %>%
+          addSelection(tipo, param = list(name = "sel3", sele = sele3, colorValue = "blue", colorScheme = "uniform")) %>%
+          addSelection(tipo, param = list(name = "sel4", sele = sele4, colorValue = "black", colorScheme = "uniform")) %>%
+          addSelection(tipo, param = list(name = "sel5", sele = sele5, colorValue = "black", colorScheme = "uniform"))
       })
 
       observeEvent(input$remove, {
-        NGLVieweR_proxy("structure") %>% removeSelection("sel1") %>% removeSelection("sel2") %>%
-          removeSelection("sel3") %>% removeSelection("sel4") %>% removeSelection("sel5")
+        NGLVieweR_proxy("structure") %>%
+          removeSelection("sel1") %>%
+          removeSelection("sel2") %>%
+          removeSelection("sel3") %>%
+          removeSelection("sel4") %>%
+          removeSelection("sel5")
       })
     }
 
