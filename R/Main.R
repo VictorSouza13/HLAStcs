@@ -4,7 +4,7 @@
 #' @export
 HLAStcs <- function() {
   required_packages <- c(
-    "openxlsx", "shiny", "DT", "shinyjs"
+    "openxlsx", "shiny", "DT", "shinyjs", "shinythemes"
   )
 
   install_missing_packages <- function(packages) {
@@ -22,6 +22,7 @@ HLAStcs <- function() {
   library(shiny)
   library(DT)
   library(shinyjs)
+  library(shinythemes)
 
   read_hla_data <- function(file_path) {
     tryCatch({
@@ -347,160 +348,447 @@ HLAStcs <- function() {
     })
   }
 
-  run_logistic_regression <- function(data, outcome_var, group1, group2, allele_var, covariates = NULL) {
+  power_analysis <- function(A, B, C, D, alpha = 0.05, desired_power = 0.8) {
+    OR <- (A * D) / (B * C)
+    log_OR <- log(OR)
+    se_log_OR <- sqrt(1/A + 1/B + 1/C + 1/D)
+    z <- abs(log_OR) / se_log_OR
+    current_power <- pnorm(z - qnorm(1 - alpha / 2))
+
+    if (current_power >= desired_power) {
+      return(paste0(
+        "The estimated statistical power is ", round(current_power, 4),
+        ", which meets or exceeds the desired threshold of ", desired_power, "."
+      ))
+    }
+
+    p0 <- C / (C + D)
+    r <- (A + B) / (C + D)
+
+    simulate_power <- function(n1, n0) {
+      p1 <- OR * p0 / (1 + p0 * (OR - 1))
+      A1 <- round(n1 * p1); B1 <- n1 - A1
+      C1 <- round(n0 * p0); D1 <- n0 - C1
+      if (min(A1, B1, C1, D1) == 0) return(0)
+      se_log <- sqrt(1/A1 + 1/B1 + 1/C1 + 1/D1)
+      z <- abs(log(OR)) / se_log
+      pnorm(z - qnorm(1 - alpha / 2))
+    }
+
+    for (n1 in 10:1000000) {
+      n0 <- round(n1 / r)
+      estimated_power <- simulate_power(n1, n0)
+      if (estimated_power >= desired_power) {
+        return(paste0(
+          "The current power of this analysis is ", round(current_power, 4),
+          ", which is below the desired threshold of ", desired_power,
+          ". To achieve at least ", desired_power,
+          " power, you would need approximately ", n1,
+          " cases and ", n0, " controls. The estimated power with this sample size would be ",
+          round(estimated_power, 4), "."
+        ))
+      }
+    }
+
+    return(paste0(
+      "The current power is ", round(current_power, 4),
+      ", and a sufficient sample size to achieve ", desired_power,
+      " power could not be found within the tested range (up to 1,000,000 cases)."
+    ))
+  }
+
+  run_logistic_regression <- function(data, outcome_var, reference_groups, comparison_groups, allele_var, covariates = NULL) {
     tryCatch({
-      df <- data.frame(data)
+      if(is.null(data)) stop("Dados não fornecidos")
+      if(!outcome_var %in% names(data)) stop("Variável de resultado não encontrada")
 
-      count_alleles <- function(locus) {
+      df <- as.data.frame(data, stringsAsFactors = FALSE)
+
+      safe_count_alleles <- function(locus) {
         cols <- paste0(locus, c("_1", "_2"))
-        alleles <- unique(na.omit(unlist(df[cols])))
-        alleles <- alleles[alleles != "" & !is.na(alleles)]
-        length(alleles)
+        if(!all(cols %in% names(df))) return(0)
+
+        alleles <- unlist(df[cols])
+        alleles <- alleles[!is.na(alleles) & alleles != ""]
+        if(length(alleles) == 0) return(0)
+
+        length(unique(alleles))
       }
 
-      current_locus <- gsub("\\*.*", "", allele_var)
-      n_alleles <- count_alleles(current_locus)
+      current_locus <- sub("\\*.*", "", allele_var)
+      n_alleles <- safe_count_alleles(current_locus)
 
-      if (is.numeric(df[[outcome_var]])) {
-        median_val <- median(df[[outcome_var]], na.rm = TRUE)
-        df$outcome_binary <- as.integer(df[[outcome_var]] > median_val)
-        group_labels <- c(paste("≤", round(median_val, 2)), paste(">", round(median_val, 2)))
-      } else {
-        if (!all(c(group1, group2) %in% unique(df[[outcome_var]]))) {
-          stop("Selected groups don't exist in the outcome variable")
-        }
-        df$outcome_binary <- ifelse(df[[outcome_var]] == group1, 0,
-                                    ifelse(df[[outcome_var]] == group2, 1, NA))
-        group_labels <- c(group1, group2)
+      ref_name <- paste(reference_groups, collapse = " + ")
+      comp_name <- paste(setdiff(comparison_groups, reference_groups), collapse = " + ")
+
+      df$analysis_group <- ifelse(
+        df[[outcome_var]] %in% reference_groups, ref_name,
+        ifelse(
+          df[[outcome_var]] %in% comparison_groups, comp_name,
+          NA_character_
+        )
+      )
+
+      df <- df[!is.na(df$analysis_group), ]
+
+      if(length(unique(df$analysis_group)) < 2) {
+        stop("Não há grupos suficientes para comparação")
       }
 
-      df <- df[!is.na(df$outcome_binary), ]
+      df$outcome_binary <- as.integer(df$analysis_group == comp_name)
 
       allele_cols <- paste0(current_locus, c("_1", "_2"))
+      if(!all(allele_cols %in% names(df))) {
+        stop("Colunas de alelo não encontradas nos dados")
+      }
+
       df$allele_present <- as.integer(
         df[[allele_cols[1]]] == allele_var | df[[allele_cols[2]]] == allele_var
       )
 
-      if (!is.null(covariates)) {
-        clean_covars <- list()
-
-        for (covar in covariates) {
-          if (!covar %in% colnames(df)) {
-            stop(paste("Covariate not found:", covar))
-          }
-
-          if (is.numeric(df[[covar]])) {
-            clean_covars[[covar]] <- df[[covar]]
-          } else {
-            levels <- unique(na.omit(df[[covar]]))
-            if (length(levels) != 2) {
-              stop(paste("Categorical covariate must have exactly 2 levels:", covar))
-            }
-            clean_covars[[covar]] <- as.integer(df[[covar]] == levels[2])
-          }
+      original_var_names <- list()
+      if(!is.null(covariates)) {
+        missing_covars <- setdiff(covariates, names(df))
+        if(length(missing_covars) > 0) {
+          stop(paste("Covariáveis não encontradas:", paste(missing_covars, collapse = ", ")))
         }
 
-        df <- cbind(df, as.data.frame(clean_covars))
+        for(covar in covariates) {
+          if(!is.numeric(df[[covar]])) {
+            original_var_names[[covar]] <- covar
+            df[[covar]] <- factor(df[[covar]])
+          }
+        }
       }
 
-      if (is.null(covariates)) {
-        formula <- as.formula("outcome_binary ~ allele_present")
-      } else {
-        formula <- as.formula(paste("outcome_binary ~ allele_present +",
-                                    paste(covariates, collapse = " + ")))
+      formula_terms <- "allele_present"
+      if(!is.null(covariates)) {
+        formula_terms <- c(formula_terms, covariates)
       }
+      formula <- reformulate(termlabels = formula_terms, response = "outcome_binary")
 
-      model <- glm(formula, data = df, family = binomial())
+      model <- tryCatch({
+        glm(formula, data = df, family = binomial())
+      }, error = function(e) {
+        stop(paste("Falha ao ajustar modelo:", e$message))
+      })
 
-      coefs <- summary(model)$coefficients
-      or <- exp(coef(model))
-      suppressMessages(ci <- exp(confint(model)))
-      aic <- AIC(model)
+      safe_extract_results <- function(model, allele_name, n_alleles, original_names) {
+        coefs <- summary(model)$coefficients
+        or <- exp(coef(model))
+        ci <- suppressMessages(exp(confint(model)))
 
-      p_values <- coefs[-1, 4]
-      p_corrected <- rep(NA, length(p_values))
-
-      is_allele <- grepl("allele_present", names(p_values))
-      p_corrected[is_allele] <- p_values[is_allele] * n_alleles
-      p_corrected[!is_allele] <- p_values[!is_allele]
-
-      p_corrected <- ifelse(p_corrected > 1, ">0.99",
-                            ifelse(p_corrected < 0.0001, "<0.0001",
-                                   round(p_corrected, 4)))
-
-      results <- list(
-        model = model,
-        summary = data.frame(
-          Variable = c(allele_var, covariates),
+        result_table <- data.frame(
+          Term = rownames(coefs)[-1],
           OR = round(or[-1], 4),
-          CI_95 = sapply(2:nrow(ci), function(i) {
-            paste0("(", round(ci[i, 1], 3), "-", round(ci[i, 2], 3), ")")
-          }),
-          p_value = ifelse(p_values < 0.0001, "<0.0001", round(p_values, 4)),
-          Pc = p_corrected,
-          stringsAsFactors = FALSE,
-          row.names = NULL
-        ),
-        groups = group_labels,
-        allele = allele_var,
-        n_alleles = n_alleles,
-        n = nrow(df),
-        covariates = covariates,
-        aic = aic
+          CI_lower = round(ci[-1, 1], 4),
+          CI_upper = round(ci[-1, 2], 4),
+          p_value = coefs[-1, 4],
+          stringsAsFactors = FALSE
+        )
+
+        is_allele_term <- result_table$Term == "allele_present"
+        result_table$Pc <- result_table$p_value
+        result_table$Pc[is_allele_term] <- pmin(1, result_table$p_value[is_allele_term] * n_alleles)
+
+        restore_original_names <- function(term) {
+          if(term == "allele_present") return(allele_name)
+
+          for(var in names(original_names)) {
+            if(grepl(paste0("^", var), term)) {
+              return(original_names[[var]])
+            }
+          }
+
+          term
+        }
+
+        result_table$Term <- sapply(result_table$Term, restore_original_names)
+        result_table <- result_table[!duplicated(result_table$Term), ]
+
+        result_table
+      }
+
+      safe_contingency_table <- function(df) {
+        tbl <- table(
+          Group = df$analysis_group,
+          Allele = factor(df$allele_present, levels = 0:1, labels = c("Absent", allele_var))
+        )
+        as.data.frame.matrix(tbl)
+      }
+
+      power_analysis <- function(A, B, C, D, comp_name, ref_name, alpha = 0.05, desired_power = 0.8) {
+        if(A == 0 || B == 0 || C == 0 || D == 0) {
+          return("Could not calculate power - insufficient data")
+        }
+
+        OR <- (A * D) / (B * C)
+        log_OR <- log(OR)
+        se_log_OR <- sqrt(1/A + 1/B + 1/C + 1/D)
+
+        z_power <- qnorm(1 - alpha/2)
+        current_power <- pnorm(abs(log_OR)/se_log_OR - z_power)
+
+        if(current_power >= desired_power) {
+          return(paste0(
+            "Current power: ", round(current_power*100, 1), "% (adequate)"
+          ))
+        }
+
+        p0 <- C / (C + D)
+        p1 <- (OR * p0) / (1 + p0 * (OR - 1))
+
+        n <- (qnorm(1-alpha/2) + qnorm(desired_power))^2 *
+          (1/(p1*(1-p1)) + 1/(p0*(1-p0))) /
+          (log(OR)^2)
+
+        n <- ceiling(n)
+
+        paste0(
+          "Current power: ", round(current_power*100, 1), "%. ",
+          "To achieve 80% power, approximately ",
+          n, " total samples would be needed (",
+          round(n * (A+B)/(A+B+C+D)), " ", comp_name,
+          " and ", round(n * (C+D)/(A+B+C+D)), " ", ref_name, ")."
+        )
+      }
+
+      contingency <- safe_contingency_table(df)
+      power_result <- tryCatch({
+        power_analysis(
+          A = contingency[comp_name, allele_var],
+          B = contingency[comp_name, "Absent"],
+          C = contingency[ref_name, allele_var],
+          D = contingency[ref_name, "Absent"],
+          comp_name = comp_name,
+          ref_name = ref_name
+        )
+      }, error = function(e) {
+        paste("Não foi possível calcular o poder estatístico:", e$message)
+      })
+
+      list(
+        results = safe_extract_results(model, allele_var, n_alleles, original_var_names),
+        contingency = contingency,
+        model_info = list(
+          reference = ref_name,
+          comparison = comp_name,
+          n_samples = nrow(df),
+          aic = round(AIC(model), 2),
+          n_alleles = n_alleles,
+          power = power_result
+        )
       )
 
-      return(results)
-
     }, error = function(e) {
-      stop(paste("Regression error:", e$message))
+      stop(paste("Erro na análise:", e$message))
     })
   }
 
   ui <- fluidPage(
+    tags$head(
+      tags$style(HTML("
+    /* Increase font size for select boxes */
+    select {
+      font-size: 16px !important;
+      height: auto !important;
+      padding: 8px !important;
+    }
+
+    /* Increase font size for dropdown items */
+    select option {
+      font-size: 12px !important;
+      padding: 8px !important;
+    }
+
+    /* Adjust dropdown size */
+    .selectize-dropdown {
+      font-size: 10px !important;
+    }
+
+    /* Increase font size for text inputs */
+    input[type='text'] {
+      font-size: 16px !important;
+      height: auto !important;
+      padding: 8px !important;
+    }
+  "))
+    ),
+    tags$head(
+      tags$style(HTML("
+      /* Main container adjustment */
+      .container-fluid {
+        max-width: 95%;
+        width: 95%;
+        margin-left: auto;
+        margin-right: auto;
+      }
+
+      /* Adjustment for main area */
+      .main-container {
+        width: 100% !important;
+      }
+
+      /* Adjustment for main panel */
+      .col-sm-9 {
+        width: 65% !important;
+      }
+
+      /* Adjustment for side panel */
+      .col-sm-3 {
+        width: 35% !important;
+      }
+
+      /* Adjustment for tables */
+      .dataTables_wrapper {
+        width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+      }
+    "))
+    ),
+    theme = shinytheme("flatly"),
     useShinyjs(),
-    titlePanel("HLA Analysis"),
+    tags$head(
+      tags$style(HTML("
+        .well {
+          background-color: #f8f9fa;
+          border-radius: 5px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .btn-primary {
+          background-color: #2c3e50;
+          border-color: #2c3e50;
+        }
+        .btn-primary:hover {
+          background-color: #1a252f;
+          border-color: #1a252f;
+        }
+        .nav-tabs>li.active>a, .nav-tabs>li.active>a:focus, .nav-tabs>li.active>a:hover {
+          background-color: #f8f9fa;
+          border-bottom-color: transparent;
+          color: #2c3e50;
+          font-weight: bold;
+        }
+        h3, h4 {
+          color: #2c3e50;
+          margin-top: 20px;
+        }
+        .tab-content {
+          background-color: white;
+          padding: 15px;
+          border-radius: 0 0 5px 5px;
+          border: 1px solid #ddd;
+          border-top: none;
+        }
+        .dataTables_wrapper .dataTables_info {
+          color: #7b8a8b;
+        }
+        .shiny-notification {
+          font-size: 16px;
+          padding: 15px 20px;
+        }
+        .shiny-notification-error {
+          background-color: #e74c3c;
+          color: white;
+        }
+        .shiny-notification-success {
+          background-color: #2ecc71;
+          color: white;
+        }
+      "))
+    ),
+
+    titlePanel(
+      div(
+        icon("dna", class = "fa-2x", style = "margin-right: 15px; color: #2c3e50;"),
+        "HLA/SNP Statistical Analysis Tool",
+        style = "display: flex; align-items: center; color: #2c3e50;"
+      )
+    ),
+
     sidebarLayout(
       sidebarPanel(
-        fileInput("file", "Load Excel file", accept = c(".xlsx", ".xls")),
-
-        h4("HLA Column Mapping"),
-        div(id = "loci_mapping",
-            uiOutput("loci_mapping_ui")
+        width = 3,
+        wellPanel(
+          style = "background-color: #f8f9fa;",
+          h4("Data Input", icon("database")),
+          fileInput("file", "",
+                    accept = c(".xlsx", ".xls"),
+                    buttonLabel = "Browse...",
+                    placeholder = "No file selected")
         ),
-        fluidRow(
-          column(6, actionButton("add_locus", "Add Locus", icon = icon("plus"), width = "100%")),
-          column(6, actionButton("remove_locus", "Remove Locus", icon = icon("minus"), width = "100%"))
+
+        wellPanel(
+          style = "background-color: #f8f9fa;",
+          h4("Variant Mapping", icon("map-marked-alt")),
+          div(id = "loci_mapping",
+              uiOutput("loci_mapping_ui")
+          ),
+          fluidRow(
+            column(6, actionButton("add_locus", "Add",
+                                   icon = icon("plus-circle"),
+                                   class = "btn-success",
+                                   width = "100%")),
+            column(6, actionButton("remove_locus", "Del",
+                                   icon = icon("minus-circle"),
+                                   class = "btn-danger",
+                                   width = "100%"))
+          )
         ),
 
-        actionButton("analyze", "Analyze Data", class = "btn-primary",
-                     style = "width: 100%; height: 50px; font-size: 16px;"),
-        helpText("Analyze allele frequencies, Hardy-Weinberg equilibrium, linkage disequilibrium and complete haplotypes.")
+        actionButton("analyze", "Run analysis",
+                     icon = icon("play-circle"),
+                     class = "btn-primary",
+                     style = "background-color: #9b59b6; color: white; border: none;width: 100%; height: 50px; font-size: 24px; margin-top: 20px;"),
+        helpText(icon("info-circle"),
+                 "Analyze allele frequencies, Hardy-Weinberg equilibrium, linkage disequilibrium and complete haplotypes.")
       ),
+
       mainPanel(
+        width = 9,
         tabsetPanel(
-          tabPanel("Frequencies",
+          type = "tabs",
+          tabPanel(icon("chart-bar"), "Frequencies",
                    uiOutput("freq_tables_ui")),
-          tabPanel("Hardy-Weinberg",
-                   tableOutput("hweTable"),
-                   verbatimTextOutput("hweDetails")),
-          tabPanel("Linkage Disequilibrium",
-                   h4("Linkage Disequilibrium Results"),
-                   uiOutput("ldTabs")),
-          tabPanel("Haplotypes",
-                   h3("Complete Haplotypes"),
-                   verbatimTextOutput("haplotypeSummary"),
-                   DTOutput("haplotypeTable")),
-          tabPanel("Logistic Regression",
-                   h3("Logistic Regression Analysis"),
-                   selectInput("outcome_var", "Outcome Variable:", choices = NULL),
-                   uiOutput("group_selection_ui"),
-                   selectInput("allele_var", "Allele for analysis:", choices = NULL),
-                   uiOutput("covariate_selection_ui"),
-                   actionButton("run_regression", "Calculate", class = "btn-primary"),
-                   tags$hr(),
-                   h4("Results:"),
-                   verbatimTextOutput("regression_summary"),
-                   tableOutput("regression_table"))
+          tabPanel(icon("balance-scale"), "Hardy-Weinberg",
+                   div(class = "well",
+                       h4("Hardy-Weinberg Equilibrium Results"),
+                       tableOutput("hweTable"),
+                       verbatimTextOutput("hweDetails"))),
+          tabPanel(icon("link"), "Linkage Disequilibrium",
+                   div(class = "well",
+                       h4("Linkage Disequilibrium Results"),
+                       uiOutput("ldTabs"))),
+          tabPanel(icon("dna"), "Haplotypes",
+                   div(class = "well",
+                       h3(icon("dna"), "Complete Haplotypes"),
+                       verbatimTextOutput("haplotypeSummary"),
+                       DTOutput("haplotypeTable"))),
+          tabPanel(icon("line-chart"), "Logistic Regression",
+                   div(class = "well",
+                       h3(icon("line-chart"), "Logistic Regression Analysis"),
+                       fluidRow(
+                         column(6, selectInput("outcome_var", "Outcome Variable:",
+                                               choices = NULL, width = "100%")),
+                         column(6, uiOutput("group_selection_ui"))
+                       ),
+                       fluidRow(
+                         column(4, selectInput("locus_var", "Select Locus:",
+                                               choices = NULL, width = "100%")),
+                         column(4, uiOutput("allele_selection_ui")),
+                         column(4, uiOutput("covariate_selection_ui"))
+                       ),
+                       actionButton("run_regression", "Run Regression",
+                                    icon = icon("calculator"),
+                                    class = "btn-primary"),
+                       tags$hr(),
+                       h4(icon("table"), "Results:"),
+                       verbatimTextOutput("regression_summary"),
+                       tableOutput("regression_table"),
+                       uiOutput("regression_footer")
+                   )
+          )
         )
       )
     )
@@ -512,10 +800,46 @@ HLAStcs <- function() {
 
     loci_mapping <- reactiveVal(list())
 
+    power_analysis <- function(A, B, C, D, comp_name, ref_name, alpha = 0.05, desired_power = 0.8) {
+      if(A == 0 || B == 0 || C == 0 || D == 0) {
+        return("Could not calculate power - insufficient data")
+      }
+
+      OR <- (A * D) / (B * C)
+      log_OR <- log(OR)
+      se_log_OR <- sqrt(1/A + 1/B + 1/C + 1/D)
+
+      z_power <- qnorm(1 - alpha/2)
+      current_power <- pnorm(abs(log_OR)/se_log_OR - z_power)
+
+      if(current_power >= desired_power) {
+        return(paste0(
+          "Current power: ", round(current_power*100, 1), "% (adequate)"
+        ))
+      }
+
+      p0 <- C / (C + D)
+      p1 <- (OR * p0) / (1 + p0 * (OR - 1))
+
+      n <- (qnorm(1-alpha/2) + qnorm(desired_power))^2 *
+        (1/(p1*(1-p1)) + 1/(p0*(1-p0))) /
+        (log(OR)^2)
+
+      n <- ceiling(n)
+
+      paste0(
+        "Current power: ", round(current_power*100, 1), "%. ",
+        "To achieve 80% power, approximately ",
+        n, " total samples would be needed (",
+        round(n * (A+B)/(A+B+C+D)), " ", comp_name,
+        " and ", round(n * (C+D)/(A+B+C+D)), " ", ref_name, ")."
+      )
+    }
+
     observeEvent(input$add_locus, {
       current <- loci_mapping()
       new_id <- paste0("locus_", length(current) + 1)
-      current[[new_id]] <- list(locus = "", col1 = "", col2 = "")
+      current[[new_id]] <- list(locus = "", col = "")
       loci_mapping(current)
     })
 
@@ -526,6 +850,17 @@ HLAStcs <- function() {
         loci_mapping(current)
       }
     })
+
+    format_p_value <- function(p) {
+      if(is.na(p)) return(NA)
+      if(p == "<0.0001") return("<0.001")
+      if(p == ">0.99") return(">0.99")
+      if(grepl("<|>", p)) return(p)
+      num_p <- suppressWarnings(as.numeric(p))
+      if(is.na(num_p)) return(p)
+      if(num_p < 0.001) return("<0.001")
+      return(format(round(num_p, 3), nsmall = 3))
+    }
 
     output$loci_mapping_ui <- renderUI({
       loci_list <- loci_mapping()
@@ -540,14 +875,25 @@ HLAStcs <- function() {
       tagList(
         lapply(names(loci_list), function(id) {
           fluidRow(
-            column(4, textInput(paste0(id, "_name"), "Locus Name:",
-                                value = loci_list[[id]]$locus)),
-            column(4, selectInput(paste0(id, "_col1"), "Allele 1 Column:",
-                                  choices = cols_available,
-                                  selected = loci_list[[id]]$col1)),
-            column(4, selectInput(paste0(id, "_col2"), "Allele 2 Column:",
-                                  choices = cols_available,
-                                  selected = loci_list[[id]]$col2))
+            column(4,
+                   div(style = "font-size: 12px;",
+                       textInput(
+                         inputId = paste0(id, "_name"),
+                         label = "Locus Name:",
+                         value = loci_list[[id]]$locus
+                       )
+                   )
+            ),
+            column(8,
+                   div(style = "font-size: 12px;",
+                       selectInput(
+                         inputId = paste0(id, "_col"),
+                         label = "Genotype Column:",
+                         choices = cols_available,
+                         selected = loci_list[[id]]$col
+                       )
+                   )
+            )
           )
         })
       )
@@ -580,17 +926,20 @@ HLAStcs <- function() {
 
         for(id in names(loci_mapping())) {
           locus_name <- input[[paste0(id, "_name")]]
-          col1 <- input[[paste0(id, "_col1")]]
-          col2 <- input[[paste0(id, "_col2")]]
+          genotype_col <- input[[paste0(id, "_col")]]
 
-          if(!is.null(locus_name) && !is.null(col1) && !is.null(col2) &&
-             locus_name != "" && col1 != "" && col2 != "") {
-            if(!all(c(col1, col2) %in% colnames(processed_data))) {
-              stop(paste("Columns", col1, "or", col2, "not found in data"))
+          if(!is.null(locus_name) && !is.null(genotype_col) &&
+             locus_name != "" && genotype_col != "") {
+
+            if(!genotype_col %in% colnames(processed_data)) {
+              stop(paste("Column", genotype_col, "not found in data"))
             }
 
-            colnames(processed_data)[colnames(processed_data) == col1] <- paste0(locus_name, "_1")
-            colnames(processed_data)[colnames(processed_data) == col2] <- paste0(locus_name, "_2")
+            split_alleles <- strsplit(as.character(processed_data[[genotype_col]]), "/")
+
+            processed_data[[paste0(locus_name, "_1")]] <- sapply(split_alleles, `[`, 1)
+            processed_data[[paste0(locus_name, "_2")]] <- sapply(split_alleles, `[`, 2)
+
             selected_loci <- c(selected_loci, locus_name)
           }
         }
@@ -803,12 +1152,29 @@ HLAStcs <- function() {
       outcome_options <- setdiff(colnames(data), hla_cols)
       updateSelectInput(session, "outcome_var", choices = outcome_options)
 
-      allele_options <- unique(unlist(data[, hla_cols]))
-      allele_options <- allele_options[!is.na(allele_options) & allele_options != ""]
-      updateSelectInput(session, "allele_var", choices = sort(allele_options))
+      if(!is.null(analysis_results$selected_loci)) {
+        updateSelectInput(session, "locus_var", choices = analysis_results$selected_loci)
+      }
 
       covar_options <- setdiff(colnames(data), c(hla_cols, input$outcome_var))
       updateSelectInput(session, "covariates", choices = covar_options)
+    })
+
+    output$allele_selection_ui <- renderUI({
+      req(input$locus_var, analysis_results$data)
+
+      locus <- input$locus_var
+      col1 <- paste0(locus, "_1")
+      col2 <- paste0(locus, "_2")
+
+      if(all(c(col1, col2) %in% colnames(analysis_results$data))) {
+        alleles <- unique(c(analysis_results$data[[col1]], analysis_results$data[[col2]]))
+        alleles <- alleles[!is.na(alleles) & alleles != ""]
+
+        selectInput("allele_var", "Select Allele:",
+                    choices = sort(alleles),
+                    width = "100%")
+      }
     })
 
     output$group_selection_ui <- renderUI({
@@ -818,41 +1184,52 @@ HLAStcs <- function() {
       if (!input$outcome_var %in% colnames(data)) return(NULL)
 
       if (is.numeric(data[[input$outcome_var]])) {
-        median_val <- median(data[[input$outcome_var]], na.rm = TRUE)
+        quantiles <- quantile(data[[input$outcome_var]],
+                              probs = seq(0, 1, 0.25),
+                              na.rm = TRUE)
+        groups <- c("Q1 (0-25%)", "Q2 (25-50%)", "Q3 (50-75%)", "Q4 (75-100%)")
         tagList(
-          helpText(paste("Numeric variable - split by median (", round(median_val, 2), "):")),
-          textInput("group1_name", "Group 1 (Reference):",
-                    value = paste("≤", round(median_val, 2))),
-          textInput("group2_name", "Group 2 (Comparison):",
-                    value = paste(">", round(median_val, 2)))
+          selectInput("reference_groups", "Reference Group(s):",
+                      choices = groups, selected = groups[1],
+                      multiple = TRUE),
+          selectInput("comparison_groups", "Comparison Group(s):",
+                      choices = groups, selected = groups[-1],
+                      multiple = TRUE),
+          helpText("Select one or more groups for each category")
         )
       } else {
         values <- unique(data[[input$outcome_var]])
         values <- values[!is.na(values)]
         tagList(
-          selectInput("group1", "Group 1 (Reference):", choices = values),
-          selectInput("group2", "Group 2 (Comparison):", choices = values,
-                      selected = ifelse(length(values) >= 2, values[2], values[1]))
+          selectInput("reference_groups", "Reference Group(s):",
+                      choices = values, selected = values[1],
+                      multiple = TRUE),
+          selectInput("comparison_groups", "Comparison Group(s):",
+                      choices = values, selected = values[-1],
+                      multiple = TRUE),
+          helpText("Select one or more groups for each category")
         )
       }
     })
 
     regression_results <- eventReactive(input$run_regression, {
-      req(analysis_results$data, input$outcome_var, input$allele_var)
+      req(analysis_results$data, input$outcome_var, input$allele_var,
+          input$reference_groups, input$comparison_groups)
 
-      if (is.numeric(analysis_results$data[[input$outcome_var]])) {
-        group1 <- NA
-        group2 <- NA
-      } else {
-        group1 <- input$group1
-        group2 <- input$group2
+      comparison_groups <- setdiff(input$comparison_groups, input$reference_groups)
+
+      if(length(input$reference_groups) == 0) {
+        stop("Please select at least one reference group")
+      }
+      if(length(comparison_groups) == 0) {
+        stop("Please select at least one comparison group that's different from reference")
       }
 
       run_logistic_regression(
         data = analysis_results$data,
         outcome_var = input$outcome_var,
-        group1 = group1,
-        group2 = group2,
+        reference_groups = input$reference_groups,
+        comparison_groups = comparison_groups,
         allele_var = input$allele_var,
         covariates = input$covariates
       )
@@ -862,46 +1239,94 @@ HLAStcs <- function() {
       req(regression_results())
       res <- regression_results()
 
-      cat("=== LOGISTIC REGRESSION ===\n")
-      cat("Analyzed allele:", res$allele, "\n")
-      cat("Reference group (0):", res$groups[1], "\n")
-      cat("Comparison group (1):", res$groups[2], "\n")
-      cat("Sample used:", res$n, "individuals\n")
-      cat("AIC (Akaike Information Criterion):", round(res$aic, 2), "\n\n")
-      cat("Method: Generalized linear model (binomial family)\n")
-      cat("AIC interpretation:\n")
-      cat("- Lower AIC indicates better model\n")
-      cat("- Differences >2 between models are considered significant\n")
+      if(is.null(res$model_info) || is.null(res$contingency)) {
+        stop("Invalid results structure")
+      }
+
+      cat("=== LOGISTIC REGRESSION ANALYSIS ===\n\n")
+      cat("Reference Groups:", paste(input$reference_groups, collapse = " + "), "\n")
+      cat("Comparison Groups:", paste(setdiff(input$comparison_groups, input$reference_groups), collapse = " + "), "\n")
+      cat("Number of Samples:", res$model_info$n_samples, "\n")
+      cat("Number of Unique Alleles:", res$model_info$n_alleles, "\n")
+      cat("\nAllele Distribution:\n")
+      print(res$contingency)
     })
 
     output$regression_table <- renderTable({
       req(regression_results())
+      res <- regression_results()$results
+
+      data.frame(
+        Variable = res$Term,
+        OR = sprintf("%.2f", res$OR),
+        `95% CI` = sprintf("(%.2f-%.2f)", res$CI_lower, res$CI_upper),
+        `p-value` = ifelse(res$p_value < 0.001, "<0.001", sprintf("%.3f", res$p_value)),
+        `Pc` = ifelse(res$Pc < 0.001, "<0.001", sprintf("%.3f", res$Pc)),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    }, rownames = FALSE, striped = TRUE, hover = TRUE)
+
+    observe({
+      req(regression_results())
       res <- regression_results()
 
-      model_summary <- res$summary
+      for(comparison in res) {
+        local({
+          comp <- comparison
+          output_name <- paste0("regression_table_", comp$comparison_group)
 
-      model_summary$Variable <- gsub("_", " ", model_summary$Variable)
-      model_summary$Variable <- tools::toTitleCase(model_summary$Variable)
+          output[[output_name]] <- renderTable({
+            model_summary <- comp$summary
 
-      model_summary <- model_summary[, c("Variable", "OR", "CI_95", "p_value", "Pc")]
+            model_summary$Variable <- gsub("_", " ", model_summary$Variable)
+            model_summary$Variable <- tools::toTitleCase(model_summary$Variable)
 
-      aic_row <- data.frame(
-        Variable = "Model AIC",
-        OR = round(res$aic, 2),
-        CI_95 = "",
-        p_value = "",
-        Pc = ""
+            model_summary$`p-value` <- sapply(model_summary$p_value, format_p_value)
+            model_summary$`Pc` <- sapply(model_summary$Pc, format_p_value)
+
+            model_summary$`OR (95% CI)` <- paste0(
+              format(round(model_summary$OR, 2), nsmall = 2),
+              " (",
+              gsub("[\\(\\)]", "", model_summary$CI_95),
+              ")"
+            )
+
+            final_table <- model_summary[, c("Variable", "OR (95% CI)", "p-value", "Pc")]
+            colnames(final_table) <- c("Variable", "OR (95% CI)", "p-value", "Pc*")
+
+            final_table
+          },
+          align = "llrr",
+          rownames = FALSE,
+          striped = TRUE,
+          width = "100%",
+          hover = TRUE,
+          bordered = TRUE)
+        })
+      }
+    })
+
+    output$regression_footer <- renderUI({
+      req(regression_results())
+      res <- regression_results()
+
+      tagList(
+        tags$div(
+          style = "margin-top: 20px; background: #f8f9fa; padding: 10px; border-radius: 5px;",
+          tags$p(tags$strong("Model AIC:"), tags$code(res$model_info$aic)),
+          tags$p(tags$strong("Statistical Power:"), res$model_info$power),
+          tags$p(tags$strong("Bonferroni Correction:"),
+                 "Pc corrected for", res$model_info$n_alleles, "alleles"),
+          tags$hr(),
+          tags$p(tags$em("Interpretation:"),
+                 paste("OR > 1 indicates association with",
+                       res$model_info$comparison,
+                       "group(s) compared to",
+                       res$model_info$reference))
+        )
       )
-
-      final_table <- rbind(model_summary, aic_row)
-
-      output$regression_note <- renderText({
-        paste("Bonferroni correction applied by multiplying by number of alleles in locus (n =",
-              res$n_alleles, ")")
-      })
-
-      final_table
-    }, striped = TRUE, digits = 4, align = 'lrrrr')
+    })
 
     output$covariate_selection_ui <- renderUI({
       req(analysis_results$data, input$outcome_var)
@@ -914,7 +1339,7 @@ HLAStcs <- function() {
         c(hla_cols, input$outcome_var)
       )
 
-      covar_options <- covar_options[sapply(data[, covar_options], function(x) {
+      covar_options <- covar_options[sapply(data[, covar_options, drop = FALSE], function(x) {
         is.numeric(x) || length(unique(na.omit(x))) == 2
       })]
 
@@ -922,7 +1347,7 @@ HLAStcs <- function() {
         return(helpText("No suitable covariates found (must be numeric or binary)"))
       }
 
-      var_types <- sapply(data[, covar_options], function(x) {
+      var_types <- sapply(data[, covar_options, drop = FALSE], function(x) {
         if (is.numeric(x)) " (numeric)" else " (binary)"
       })
 
