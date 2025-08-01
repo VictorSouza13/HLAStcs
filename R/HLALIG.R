@@ -1,9 +1,18 @@
-#' Uso de predição de HLA
+#' InSilico: In Silico HLA-Peptide Binding Prediction Tool
 #'
-#' Esta função ativa o software.
+#' This function launches an interactive Shiny app that allows the user to predict
+#' peptide binding affinities to specific HLA alleles using the IEDB API and visualize
+#' protein structures from the RCSB PDB using NGLVieweR.
+#'
+#' @return Opens a Shiny application window (no R object returned).
+#'
 #' @examples
+#' \dontrun{
 #' InSilico()
+#' }
+#'
 #' @export
+
 InSilico <- function() {
   install_if_missing <- function(pkg) {
     if (!requireNamespace(pkg, quietly = TRUE)) {

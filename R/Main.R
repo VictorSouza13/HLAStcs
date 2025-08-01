@@ -76,6 +76,43 @@ HLAStcs <- function() {
     return(freq_list)
   }
 
+  calculate_genotype_frequencies <- function(hla_data, selected_loci) {
+    if(is.null(hla_data)) stop("Missing genotype data")
+
+    freq_list <- list()
+
+    for(locus in selected_loci) {
+      col1 <- paste0(locus, "_1")
+      col2 <- paste0(locus, "_2")
+
+      if(!all(c(col1, col2) %in% colnames(hla_data))) {
+        stop(paste("Columns for locus", locus, "not found (expected:", col1, "and", col2, ")"))
+      }
+
+      genotypes <- apply(hla_data[, c(col1, col2)], 1, function(x) {
+        if(any(is.na(x)) || any(x == "") || any(x == "NA")) return(NA)
+        paste(sort(trimws(as.character(x))), collapse = "/")
+      })
+
+      genotypes <- genotypes[!is.na(genotypes)]
+
+      if(length(genotypes) == 0) next
+
+      freq_table <- as.data.frame(table(genotypes))
+      if(nrow(freq_table) == 0) next
+
+      freq_table$Frequency <- freq_table$Freq / sum(freq_table$Freq)
+      freq_table$Percentage <- round(freq_table$Frequency * 100, 2)
+      freq_table$Count <- freq_table$Freq
+      freq_table <- freq_table[order(-freq_table$Frequency), c("genotypes", "Count", "Percentage")]
+
+      freq_list[[locus]] <- freq_table
+    }
+
+    if(length(freq_list) == 0) stop("Could not calculate genotype frequencies")
+    return(freq_list)
+  }
+
   test_hwe <- function(hla_data, selected_loci) {
     hwe_results <- list()
 
@@ -397,29 +434,122 @@ HLAStcs <- function() {
     ))
   }
 
-  run_logistic_regression <- function(data, outcome_var, reference_groups, comparison_groups, allele_var, covariates = NULL) {
+  run_logistic_regression <- function(data, outcome_var, reference_groups, comparison_groups, variant_var, covariates = NULL, analysis_type = "allele") {
     tryCatch({
-      if(is.null(data)) stop("Dados não fornecidos")
-      if(!outcome_var %in% names(data)) stop("Variável de resultado não encontrada")
+      if(is.null(data)) stop("No data provided")
+      if(!outcome_var %in% names(data)) stop(paste("Outcome variable", outcome_var, "not found in data"))
 
       df <- as.data.frame(data, stringsAsFactors = FALSE)
 
-      safe_count_alleles <- function(locus) {
-        cols <- paste0(locus, c("_1", "_2"))
-        if(!all(cols %in% names(df))) return(0)
+      detect_genetic_columns <- function(variant) {
+        if(grepl("[A-Z]+\\*\\d+", variant)) {
+          locus <- gsub("\\*.*", "", variant)
+          cols_1_2 <- c(paste0(locus, "_1"), paste0(locus, "_2"))
+          single_col <- locus
 
-        alleles <- unlist(df[cols])
-        alleles <- alleles[!is.na(alleles) & alleles != ""]
-        if(length(alleles) == 0) return(0)
+          if(all(cols_1_2 %in% names(df))) {
+            return(list(type="hla", cols=cols_1_2, format="two_column"))
+          } else if(single_col %in% names(df)) {
+            return(list(type="hla", cols=c(single_col), format="single_column"))
+          }
+        }
 
-        length(unique(alleles))
+        if(grepl("^rs\\d+$", variant)) {
+          if(variant %in% names(df)) {
+            return(list(type="snp", cols=c(variant), format="single_column"))
+          }
+        }
+
+        if(grepl("/", variant)) {
+          possible_cols <- names(df)[sapply(df, function(x) any(grepl("/", x)))]
+          if(length(possible_cols) > 0) {
+            return(list(type="genotype", cols=possible_cols[1], format="single_column"))
+          }
+        }
+
+        possible_cols <- names(df)[sapply(df, function(x) any(grepl(variant, x)))]
+        if(length(possible_cols) > 0) {
+          return(list(type="partial", cols=possible_cols[1], format="single_column"))
+        }
+
+        stop(paste("Cannot find genetic data columns for variant:", variant,
+                   "\nAvailable columns:", paste(names(df), collapse=", ")))
       }
 
-      current_locus <- sub("\\*.*", "", allele_var)
-      n_alleles <- safe_count_alleles(current_locus)
+      col_info <- tryCatch({
+        detect_genetic_columns(variant_var)
+      }, error = function(e) {
+        stop(paste("Column detection failed for variant", variant_var, ":", e$message))
+      })
 
-      ref_name <- paste(reference_groups, collapse = " + ")
-      comp_name <- paste(setdiff(comparison_groups, reference_groups), collapse = " + ")
+      count_variants <- function(col_info, analysis_type) {
+        if(col_info$type == "hla" && col_info$format == "two_column") {
+          if(analysis_type == "allele") {
+            alleles <- c(df[[col_info$cols[1]]], df[[col_info$cols[2]]])
+            alleles <- alleles[!is.na(alleles) & alleles != ""]
+            if(length(alleles) == 0) return(0)
+            length(unique(alleles))
+          } else {
+            genotypes <- apply(df[col_info$cols], 1, function(x) {
+              if(any(is.na(x)) || any(x == "") || any(x == "NA")) return(NA)
+              paste(sort(trimws(as.character(x))), collapse="/")
+            })
+            genotypes <- genotypes[!is.na(genotypes)]
+            if(length(genotypes) == 0) return(0)
+            length(unique(genotypes))
+          }
+        } else {
+          values <- df[[col_info$cols[1]]]
+          values <- values[!is.na(values) & values != ""]
+          if(length(values) == 0) return(0)
+
+          if(analysis_type == "allele" && col_info$type == "hla") {
+            alleles <- unlist(strsplit(as.character(values), "/"))
+            length(unique(alleles))
+          } else {
+            length(unique(values))
+          }
+        }
+      }
+
+      n_variants <- count_variants(col_info, analysis_type)
+
+      process_genetic_data <- function(df, col_info, variant_var, analysis_type) {
+        if(col_info$type == "hla" && col_info$format == "two_column") {
+          if(analysis_type == "allele") {
+            df$variant_present <- as.integer(
+              df[[col_info$cols[1]]] == variant_var | df[[col_info$cols[2]]] == variant_var
+            )
+          } else {
+            df$variant_present <- as.integer(
+              apply(df[col_info$cols], 1, function(x) {
+                paste(sort(trimws(as.character(x))), collapse="/") == variant_var
+              }))
+          }
+        } else {
+          col <- col_info$cols[1]
+
+          if(col_info$type == "snp") {
+            if(analysis_type == "allele") {
+              df$variant_present <- as.integer(df[[col]] > 0)
+            } else {
+              df$variant_present <- as.integer(df[[col]] == 2)
+            }
+          } else {
+            if(analysis_type == "allele") {
+              df$variant_present <- as.integer(grepl(variant_var, df[[col]]))
+            } else {
+              df$variant_present <- as.integer(df[[col]] == variant_var)
+            }
+          }
+        }
+        df
+      }
+
+      df <- process_genetic_data(df, col_info, variant_var, analysis_type)
+
+      ref_name <- paste(reference_groups, collapse=" + ")
+      comp_name <- paste(setdiff(comparison_groups, reference_groups), collapse=" + ")
 
       df$analysis_group <- ifelse(
         df[[outcome_var]] %in% reference_groups, ref_name,
@@ -432,25 +562,16 @@ HLAStcs <- function() {
       df <- df[!is.na(df$analysis_group), ]
 
       if(length(unique(df$analysis_group)) < 2) {
-        stop("Não há grupos suficientes para comparação")
+        stop("Need at least 2 distinct groups for comparison")
       }
 
       df$outcome_binary <- as.integer(df$analysis_group == comp_name)
-
-      allele_cols <- paste0(current_locus, c("_1", "_2"))
-      if(!all(allele_cols %in% names(df))) {
-        stop("Colunas de alelo não encontradas nos dados")
-      }
-
-      df$allele_present <- as.integer(
-        df[[allele_cols[1]]] == allele_var | df[[allele_cols[2]]] == allele_var
-      )
 
       original_var_names <- list()
       if(!is.null(covariates)) {
         missing_covars <- setdiff(covariates, names(df))
         if(length(missing_covars) > 0) {
-          stop(paste("Covariáveis não encontradas:", paste(missing_covars, collapse = ", ")))
+          stop(paste("Covariates not found:", paste(missing_covars, collapse=", ")))
         }
 
         for(covar in covariates) {
@@ -461,19 +582,18 @@ HLAStcs <- function() {
         }
       }
 
-      formula_terms <- "allele_present"
-      if(!is.null(covariates)) {
-        formula_terms <- c(formula_terms, covariates)
-      }
-      formula <- reformulate(termlabels = formula_terms, response = "outcome_binary")
+      formula <- reformulate(
+        termlabels = c("variant_present", covariates),
+        response = "outcome_binary"
+      )
 
       model <- tryCatch({
-        glm(formula, data = df, family = binomial())
-      }, error = function(e) {
-        stop(paste("Falha ao ajustar modelo:", e$message))
+        glm(formula, data=df, family=binomial())
+      }, error=function(e) {
+        stop(paste("Model fitting failed:", e$message))
       })
 
-      safe_extract_results <- function(model, allele_name, n_alleles, original_names) {
+      extract_results <- function(model, variant_name, n_variants, original_names) {
         coefs <- summary(model)$coefficients
         or <- exp(coef(model))
         ci <- suppressMessages(exp(confint(model)))
@@ -487,101 +607,88 @@ HLAStcs <- function() {
           stringsAsFactors = FALSE
         )
 
-        is_allele_term <- result_table$Term == "allele_present"
+        is_variant_term <- result_table$Term == "variant_present"
         result_table$Pc <- result_table$p_value
-        result_table$Pc[is_allele_term] <- pmin(1, result_table$p_value[is_allele_term] * n_alleles)
+        result_table$Pc[is_variant_term] <- pmin(1, result_table$p_value[is_variant_term] * n_variants)
 
-        restore_original_names <- function(term) {
-          if(term == "allele_present") return(allele_name)
-
+        restore_names <- function(term) {
+          if(term == "variant_present") return(variant_name)
           for(var in names(original_names)) {
             if(grepl(paste0("^", var), term)) {
               return(original_names[[var]])
             }
           }
-
           term
         }
 
-        result_table$Term <- sapply(result_table$Term, restore_original_names)
-        result_table <- result_table[!duplicated(result_table$Term), ]
-
-        result_table
+        result_table$Term <- sapply(result_table$Term, restore_names)
+        result_table[!duplicated(result_table$Term), ]
       }
 
-      safe_contingency_table <- function(df) {
-        tbl <- table(
-          Group = df$analysis_group,
-          Allele = factor(df$allele_present, levels = 0:1, labels = c("Absent", allele_var))
-        )
+      create_contingency <- function(df, variant_name, analysis_type) {
+        if(analysis_type == "allele") {
+          tbl <- table(
+            Group = df$analysis_group,
+            Variant = factor(df$variant_present, levels=0:1, labels=c("Absent", variant_name))
+          )
+        } else {
+          tbl <- table(
+            Group = df$analysis_group,
+            Variant = factor(df$variant_present, levels=0:1, labels=c("Other genotypes", variant_name))
+          )
+        }
         as.data.frame.matrix(tbl)
       }
 
-      power_analysis <- function(A, B, C, D, comp_name, ref_name, alpha = 0.05, desired_power = 0.8) {
-        if(A == 0 || B == 0 || C == 0 || D == 0) {
-          return("Could not calculate power - insufficient data")
-        }
+      contingency <- create_contingency(df, variant_var, analysis_type)
 
-        OR <- (A * D) / (B * C)
-        log_OR <- log(OR)
-        se_log_OR <- sqrt(1/A + 1/B + 1/C + 1/D)
+      power_analysis <- function(contingency, comp_name, ref_name, analysis_type, variant_var) {
+        tryCatch({
+          A <- contingency[comp_name, ifelse(analysis_type == "allele", variant_var, "Other genotypes")]
+          B <- contingency[comp_name, ifelse(analysis_type == "allele", "Absent", variant_var)]
+          C <- contingency[ref_name, ifelse(analysis_type == "allele", variant_var, "Other genotypes")]
+          D <- contingency[ref_name, ifelse(analysis_type == "allele", "Absent", variant_var)]
 
-        z_power <- qnorm(1 - alpha/2)
-        current_power <- pnorm(abs(log_OR)/se_log_OR - z_power)
+          if(any(c(A, B, C, D) == 0)) return("Power calculation not possible with zero counts")
 
-        if(current_power >= desired_power) {
-          return(paste0(
-            "Current power: ", round(current_power*100, 1), "% (adequate)"
-          ))
-        }
+          OR <- (A * D) / (B * C)
+          p0 <- C / (C + D)
+          p1 <- (OR * p0) / (1 + p0 * (OR - 1))
 
-        p0 <- C / (C + D)
-        p1 <- (OR * p0) / (1 + p0 * (OR - 1))
+          n <- (qnorm(0.975) + qnorm(0.8))^2 * (1/(p1*(1-p1)) + 1/(p0*(1-p0))) / (log(OR)^2)
+          n <- ceiling(n)
 
-        n <- (qnorm(1-alpha/2) + qnorm(desired_power))^2 *
-          (1/(p1*(1-p1)) + 1/(p0*(1-p0))) /
-          (log(OR)^2)
-
-        n <- ceiling(n)
-
-        paste0(
-          "Current power: ", round(current_power*100, 1), "%. ",
-          "To achieve 80% power, approximately ",
-          n, " total samples would be needed (",
-          round(n * (A+B)/(A+B+C+D)), " ", comp_name,
-          " and ", round(n * (C+D)/(A+B+C+D)), " ", ref_name, ")."
-        )
+          paste("Estimated OR:", round(OR, 2),
+                "| Required sample size for 80% power:", n,
+                "(", round(n * (A+B)/(A+B+C+D)), comp_name, "+",
+                round(n * (C+D)/(A+B+C+D)), ref_name, ")")
+        }, error=function(e) {
+          paste("Power calculation failed:", e$message)
+        })
       }
 
-      contingency <- safe_contingency_table(df)
-      power_result <- tryCatch({
-        power_analysis(
-          A = contingency[comp_name, allele_var],
-          B = contingency[comp_name, "Absent"],
-          C = contingency[ref_name, allele_var],
-          D = contingency[ref_name, "Absent"],
-          comp_name = comp_name,
-          ref_name = ref_name
-        )
-      }, error = function(e) {
-        paste("Não foi possível calcular o poder estatístico:", e$message)
-      })
+      power_result <- power_analysis(contingency, comp_name, ref_name, analysis_type, variant_var)
 
       list(
-        results = safe_extract_results(model, allele_var, n_alleles, original_var_names),
+        results = extract_results(model, variant_var, n_variants, original_var_names),
         contingency = contingency,
         model_info = list(
           reference = ref_name,
           comparison = comp_name,
           n_samples = nrow(df),
           aic = round(AIC(model), 2),
-          n_alleles = n_alleles,
-          power = power_result
+          n_variants = n_variants,
+          power = power_result,
+          analysis_type = analysis_type,
+          data_format = paste(col_info$type, col_info$format),
+          variant_type = ifelse(col_info$type == "snp", "SNP", "HLA"),
+          columns_used = col_info$cols,
+          variant_searched = variant_var
         )
       )
 
-    }, error = function(e) {
-      stop(paste("Erro na análise:", e$message))
+    }, error=function(e) {
+      stop(paste("Analysis error:", e$message))
     })
   }
 
@@ -750,7 +857,12 @@ HLAStcs <- function() {
         tabsetPanel(
           type = "tabs",
           tabPanel(icon("chart-bar"), "Frequencies",
-                   uiOutput("freq_tables_ui")),
+                   tabsetPanel(
+                     tabPanel("Allele Frequencies",
+                              uiOutput("freq_tables_ui")),
+                     tabPanel("Genotype Frequencies",
+                              uiOutput("geno_tables_ui"))
+                   )),
           tabPanel(icon("balance-scale"), "Hardy-Weinberg",
                    div(class = "well",
                        h4("Hardy-Weinberg Equilibrium Results"),
@@ -769,6 +881,11 @@ HLAStcs <- function() {
                    div(class = "well",
                        h3(icon("line-chart"), "Logistic Regression Analysis"),
                        fluidRow(
+                         column(12, radioButtons("analysis_type", "Analysis Type:",
+                                                 choices = c("Allele" = "allele", "Genotype" = "genotype"),
+                                                 selected = "allele", inline = TRUE))
+                       ),
+                       fluidRow(
                          column(6, selectInput("outcome_var", "Outcome Variable:",
                                                choices = NULL, width = "100%")),
                          column(6, uiOutput("group_selection_ui"))
@@ -776,7 +893,7 @@ HLAStcs <- function() {
                        fluidRow(
                          column(4, selectInput("locus_var", "Select Locus:",
                                                choices = NULL, width = "100%")),
-                         column(4, uiOutput("allele_selection_ui")),
+                         column(4, uiOutput("variant_selection_ui")),
                          column(4, uiOutput("covariate_selection_ui"))
                        ),
                        actionButton("run_regression", "Run Regression",
@@ -906,6 +1023,35 @@ HLAStcs <- function() {
 
         loci_mapping(list())
 
+        potential_loci_cols <- names(which(sapply(hla_data$data, function(x) {
+          any(grepl("/", x, fixed = TRUE))
+        })))
+
+        current_mapping <- list()
+        for(i in seq_along(potential_loci_cols)) {
+          col_name <- potential_loci_cols[i]
+
+          if(grepl("^rs\\d+$", col_name)) {
+            suggested_name <- col_name
+          }
+          else if(grepl("^[A-Z]{1,4}\\d*[A-Z]*\\d+$", col_name)) {
+            suggested_name <- col_name
+          } else {
+            suggested_name <- gsub("_genotype|_type|_allele|_hla|_typing", "", col_name, ignore.case = TRUE)
+            suggested_name <- gsub("\\d+$", "", suggested_name)
+            suggested_name <- gsub("_$", "", suggested_name)
+
+            if(suggested_name == "") suggested_name <- col_name
+          }
+
+          current_mapping[[paste0("locus_", i)]] <- list(
+            locus = suggested_name,
+            col = col_name
+          )
+        }
+
+        loci_mapping(current_mapping)
+
       }, error = function(e) {
         last_error(e$message)
         showNotification(paste("Error:", e$message), type = "error", duration = 10)
@@ -949,12 +1095,14 @@ HLAStcs <- function() {
         }
 
         allele_freqs <- calculate_allele_frequencies(processed_data, selected_loci)
+        genotype_freqs <- calculate_genotype_frequencies(processed_data, selected_loci)
         hwe_results <- test_hwe(processed_data, selected_loci)
         ld_result <- calculate_all_ld(processed_data, selected_loci)
         haplotype_result <- calculate_complete_haplotypes(processed_data, selected_loci)
 
         analysis_results$data <- processed_data
         analysis_results$allele_freqs <- allele_freqs
+        analysis_results$genotype_freqs <- genotype_freqs
         analysis_results$hwe_results <- hwe_results
         analysis_results$ld_result <- ld_result
         analysis_results$haplotype_result <- haplotype_result
@@ -976,9 +1124,23 @@ HLAStcs <- function() {
       tagList(
         lapply(analysis_results$selected_loci, function(locus) {
           tagList(
-            h3(paste("Frequencies", locus)),
+            h3(paste("Allele Frequencies -", locus)),
             textOutput(paste0("freqSummary_", locus)),
             DTOutput(paste0("freqTable_", locus))
+          )
+        })
+      )
+    })
+
+    output$geno_tables_ui <- renderUI({
+      req(analysis_results$genotype_freqs, analysis_results$selected_loci)
+
+      tagList(
+        lapply(analysis_results$selected_loci, function(locus) {
+          tagList(
+            h3(paste("Genotype Frequencies -", locus)),
+            textOutput(paste0("genoSummary_", locus)),
+            DTOutput(paste0("genoTable_", locus))
           )
         })
       )
@@ -1016,6 +1178,47 @@ HLAStcs <- function() {
               formatStyle(
                 'Percentage',
                 background = styleColorBar(freq_table$Percentage, 'lightblue'),
+                backgroundSize = '98% 88%',
+                backgroundRepeat = 'no-repeat',
+                backgroundPosition = 'center'
+              )
+          })
+        })
+      }
+    })
+
+    observe({
+      req(analysis_results$genotype_freqs, analysis_results$selected_loci)
+
+      for(locus in analysis_results$selected_loci) {
+        local({
+          local_locus <- locus
+          geno_table <- analysis_results$genotype_freqs[[local_locus]]
+
+          output[[paste0("genoSummary_", local_locus)]] <- renderText({
+            paste("Total unique genotypes", local_locus, ":", nrow(geno_table))
+          })
+
+          output[[paste0("genoTable_", local_locus)]] <- renderDT({
+            datatable(
+              geno_table,
+              colnames = c("Genotype", "Count", "Frequency (%)"),
+              options = list(
+                pageLength = 10,
+                lengthMenu = c(10, 25, 50, 100, "All"),
+                dom = 'Blfrtip',
+                buttons = c('copy', 'csv', 'excel'),
+                ordering = TRUE,
+                order = list(2, 'desc')
+              ),
+              rownames = FALSE,
+              extensions = 'Buttons',
+              selection = 'none'
+            ) %>%
+              formatRound("Percentage", 2) %>%
+              formatStyle(
+                'Percentage',
+                background = styleColorBar(geno_table$Percentage, 'lightgreen'),
                 backgroundSize = '98% 88%',
                 backgroundRepeat = 'no-repeat',
                 backgroundPosition = 'center'
@@ -1160,7 +1363,7 @@ HLAStcs <- function() {
       updateSelectInput(session, "covariates", choices = covar_options)
     })
 
-    output$allele_selection_ui <- renderUI({
+    output$variant_selection_ui <- renderUI({
       req(input$locus_var, analysis_results$data)
 
       locus <- input$locus_var
@@ -1168,11 +1371,20 @@ HLAStcs <- function() {
       col2 <- paste0(locus, "_2")
 
       if(all(c(col1, col2) %in% colnames(analysis_results$data))) {
-        alleles <- unique(c(analysis_results$data[[col1]], analysis_results$data[[col2]]))
-        alleles <- alleles[!is.na(alleles) & alleles != ""]
+        if(input$analysis_type == "allele") {
+          variants <- unique(c(analysis_results$data[[col1]], analysis_results$data[[col2]]))
+          variants <- variants[!is.na(variants) & variants != ""]
+        } else {
+          variants <- apply(analysis_results$data[c(col1, col2)], 1, function(x) {
+            if(any(is.na(x)) || any(x == "") || any(x == "NA")) return(NA)
+            paste(sort(trimws(as.character(x))), collapse = "/")
+          })
+          variants <- unique(variants[!is.na(variants)])
+        }
 
-        selectInput("allele_var", "Select Allele:",
-                    choices = sort(alleles),
+        selectInput("variant_var",
+                    ifelse(input$analysis_type == "allele", "Select Allele:", "Select Genotype:"),
+                    choices = sort(variants),
                     width = "100%")
       }
     })
@@ -1213,7 +1425,7 @@ HLAStcs <- function() {
     })
 
     regression_results <- eventReactive(input$run_regression, {
-      req(analysis_results$data, input$outcome_var, input$allele_var,
+      req(analysis_results$data, input$outcome_var, input$variant_var,
           input$reference_groups, input$comparison_groups)
 
       comparison_groups <- setdiff(input$comparison_groups, input$reference_groups)
@@ -1230,8 +1442,9 @@ HLAStcs <- function() {
         outcome_var = input$outcome_var,
         reference_groups = input$reference_groups,
         comparison_groups = comparison_groups,
-        allele_var = input$allele_var,
-        covariates = input$covariates
+        variant_var = input$variant_var,
+        covariates = input$covariates,
+        analysis_type = input$analysis_type
       )
     })
 
@@ -1244,11 +1457,12 @@ HLAStcs <- function() {
       }
 
       cat("=== LOGISTIC REGRESSION ANALYSIS ===\n\n")
+      cat("Analysis Type:", ifelse(res$model_info$analysis_type == "allele", "Allele", "Genotype"), "\n")
       cat("Reference Groups:", paste(input$reference_groups, collapse = " + "), "\n")
       cat("Comparison Groups:", paste(setdiff(input$comparison_groups, input$reference_groups), collapse = " + "), "\n")
       cat("Number of Samples:", res$model_info$n_samples, "\n")
-      cat("Number of Unique Alleles:", res$model_info$n_alleles, "\n")
-      cat("\nAllele Distribution:\n")
+      cat("Number of Unique", ifelse(res$model_info$analysis_type == "allele", "Alleles", "Genotypes"), ":", res$model_info$n_variants, "\n")
+      cat("\nDistribution:\n")
       print(res$contingency)
     })
 
@@ -1266,67 +1480,6 @@ HLAStcs <- function() {
         check.names = FALSE
       )
     }, rownames = FALSE, striped = TRUE, hover = TRUE)
-
-    observe({
-      req(regression_results())
-      res <- regression_results()
-
-      for(comparison in res) {
-        local({
-          comp <- comparison
-          output_name <- paste0("regression_table_", comp$comparison_group)
-
-          output[[output_name]] <- renderTable({
-            model_summary <- comp$summary
-
-            model_summary$Variable <- gsub("_", " ", model_summary$Variable)
-            model_summary$Variable <- tools::toTitleCase(model_summary$Variable)
-
-            model_summary$`p-value` <- sapply(model_summary$p_value, format_p_value)
-            model_summary$`Pc` <- sapply(model_summary$Pc, format_p_value)
-
-            model_summary$`OR (95% CI)` <- paste0(
-              format(round(model_summary$OR, 2), nsmall = 2),
-              " (",
-              gsub("[\\(\\)]", "", model_summary$CI_95),
-              ")"
-            )
-
-            final_table <- model_summary[, c("Variable", "OR (95% CI)", "p-value", "Pc")]
-            colnames(final_table) <- c("Variable", "OR (95% CI)", "p-value", "Pc*")
-
-            final_table
-          },
-          align = "llrr",
-          rownames = FALSE,
-          striped = TRUE,
-          width = "100%",
-          hover = TRUE,
-          bordered = TRUE)
-        })
-      }
-    })
-
-    output$regression_footer <- renderUI({
-      req(regression_results())
-      res <- regression_results()
-
-      tagList(
-        tags$div(
-          style = "margin-top: 20px; background: #f8f9fa; padding: 10px; border-radius: 5px;",
-          tags$p(tags$strong("Model AIC:"), tags$code(res$model_info$aic)),
-          tags$p(tags$strong("Statistical Power:"), res$model_info$power),
-          tags$p(tags$strong("Bonferroni Correction:"),
-                 "Pc corrected for", res$model_info$n_alleles, "alleles"),
-          tags$hr(),
-          tags$p(tags$em("Interpretation:"),
-                 paste("OR > 1 indicates association with",
-                       res$model_info$comparison,
-                       "group(s) compared to",
-                       res$model_info$reference))
-        )
-      )
-    })
 
     output$covariate_selection_ui <- renderUI({
       req(analysis_results$data, input$outcome_var)
@@ -1358,6 +1511,28 @@ HLAStcs <- function() {
         "Select covariates:",
         choices = choices,
         inline = FALSE
+      )
+    })
+
+    output$regression_footer <- renderUI({
+      req(regression_results())
+      res <- regression_results()
+
+      tagList(
+        tags$div(
+          style = "margin-top: 20px; background: #f8f9fa; padding: 10px; border-radius: 5px;",
+          tags$p(tags$strong("Model AIC:"), tags$code(res$model_info$aic)),
+          tags$p(tags$strong("Statistical Power:"), res$model_info$power),
+          tags$p(tags$strong("Bonferroni Correction:"),
+                 "Pc corrected for", res$model_info$n_variants,
+                 ifelse(res$model_info$analysis_type == "allele", "alleles", "genotypes")),
+          tags$hr(),
+          tags$p(tags$em("Interpretation:"),
+                 paste("OR > 1 indicates association with",
+                       res$model_info$comparison,
+                       "group(s) compared to",
+                       res$model_info$reference))
+        )
       )
     })
   }
